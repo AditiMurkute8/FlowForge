@@ -173,4 +173,156 @@ class BackoffStrategyTest {
             assertThat(backoff.getDelayMillis(Integer.MAX_VALUE)).isEqualTo(maxDelay);
         }
     }
+
+    @Nested
+    @DisplayName("FullJitterBackoff Strategy Tests")
+    class FullJitterBackoffTests {
+
+        /**
+         * Test double for RandomSource allowing deterministic verification of calls and bounds.
+         */
+        static class TestRandomSource implements RandomSource {
+            private final long returnValue;
+            private long lastBound = -1;
+            private int callCount = 0;
+
+            TestRandomSource(long returnValue) {
+                this.returnValue = returnValue;
+            }
+
+            @Override
+            public long nextLong(long bound) {
+                if (bound <= 0) {
+                    throw new IllegalArgumentException("bound must be > 0");
+                }
+                this.callCount++;
+                this.lastBound = bound;
+                return returnValue;
+            }
+
+            public long getLastBound() {
+                return lastBound;
+            }
+
+            public int getCallCount() {
+                return callCount;
+            }
+        }
+
+        /**
+         * Test double for BackoffStrategy tracking passed retry numbers.
+         */
+        static class TestBackoffStrategy implements BackoffStrategy {
+            private final long delayToReturn;
+            private int lastRetryNumber = -1;
+
+            TestBackoffStrategy(long delayToReturn) {
+                this.delayToReturn = delayToReturn;
+            }
+
+            @Override
+            public long getDelayMillis(int retryNumber) {
+                this.lastRetryNumber = retryNumber;
+                return delayToReturn;
+            }
+
+            public int getLastRetryNumber() {
+                return lastRetryNumber;
+            }
+        }
+
+        @Test
+        @DisplayName("1. Fake RandomSource returning 537 for base delay 8000 returns 537")
+        void testFullJitterReturnsRandomValue() {
+            TestBackoffStrategy base = new TestBackoffStrategy(8000L);
+            TestRandomSource random = new TestRandomSource(537L);
+            FullJitterBackoff jitter = new FullJitterBackoff(base, random);
+
+            assertThat(jitter.getDelayMillis(1)).isEqualTo(537L);
+        }
+
+        @Test
+        @DisplayName("2. Fake RandomSource returning 0 for base delay 8000 returns 0")
+        void testFullJitterReturnsMinimumBoundZero() {
+            TestBackoffStrategy base = new TestBackoffStrategy(8000L);
+            TestRandomSource random = new TestRandomSource(0L);
+            FullJitterBackoff jitter = new FullJitterBackoff(base, random);
+
+            assertThat(jitter.getDelayMillis(1)).isEqualTo(0L);
+        }
+
+        @Test
+        @DisplayName("3. Fake RandomSource returning 7999 for base delay 8000 returns 7999")
+        void testFullJitterReturnsMaximumBoundUpperMinusOne() {
+            TestBackoffStrategy base = new TestBackoffStrategy(8000L);
+            TestRandomSource random = new TestRandomSource(7999L);
+            FullJitterBackoff jitter = new FullJitterBackoff(base, random);
+
+            assertThat(jitter.getDelayMillis(1)).isEqualTo(7999L);
+        }
+
+        @Test
+        @DisplayName("4. BaseBackoff returning 0 returns 0 without calling RandomSource")
+        void testBaseDelayZeroDoesNotInvokeRandomSource() {
+            TestBackoffStrategy base = new TestBackoffStrategy(0L);
+            TestRandomSource random = new TestRandomSource(500L);
+            FullJitterBackoff jitter = new FullJitterBackoff(base, random);
+
+            assertThat(jitter.getDelayMillis(1)).isEqualTo(0L);
+            assertThat(random.getCallCount()).isZero();
+        }
+
+        @Test
+        @DisplayName("5. Null BackoffStrategy throws IllegalArgumentException")
+        void testNullBaseBackoffThrowsException() {
+            TestRandomSource random = new TestRandomSource(100L);
+            assertThatThrownBy(() -> new FullJitterBackoff(null, random))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("baseBackoff must not be null");
+        }
+
+        @Test
+        @DisplayName("6. Null RandomSource throws IllegalArgumentException")
+        void testNullRandomSourceThrowsException() {
+            TestBackoffStrategy base = new TestBackoffStrategy(1000L);
+            assertThatThrownBy(() -> new FullJitterBackoff(base, null))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("randomSource must not be null");
+        }
+
+        @Test
+        @DisplayName("7. Verify retryNumber is passed unchanged to base BackoffStrategy")
+        void testRetryNumberPassedUnchangedToBaseBackoff() {
+            TestBackoffStrategy base = new TestBackoffStrategy(5000L);
+            TestRandomSource random = new TestRandomSource(1234L);
+            FullJitterBackoff jitter = new FullJitterBackoff(base, random);
+
+            jitter.getDelayMillis(7);
+            assertThat(base.getLastRetryNumber()).isEqualTo(7);
+        }
+
+        @Test
+        @DisplayName("8. Verify random bound passed to RandomSource equals calculated base delay")
+        void testRandomBoundEqualsBaseDelay() {
+            TestBackoffStrategy base = new TestBackoffStrategy(8000L);
+            TestRandomSource random = new TestRandomSource(1234L);
+            FullJitterBackoff jitter = new FullJitterBackoff(base, random);
+
+            jitter.getDelayMillis(1);
+            assertThat(random.getLastBound()).isEqualTo(8000L);
+        }
+
+        @Test
+        @DisplayName("9. FullJitter with ExponentialBackoff end-to-end integration test")
+        void testFullJitterWithExponentialBackoff() {
+            ExponentialBackoff expBase = new ExponentialBackoff(1000, 30000);
+            TestRandomSource random = new TestRandomSource(1500L);
+            FullJitterBackoff jitter = new FullJitterBackoff(expBase, random);
+
+            // retry #3 base delay is 4000
+            long result = jitter.getDelayMillis(3);
+            assertThat(result).isEqualTo(1500L);
+            assertThat(random.getLastBound()).isEqualTo(4000L);
+        }
+    }
 }
