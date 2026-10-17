@@ -6,6 +6,7 @@ import com.flowforge.core.TaskGraph;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
@@ -452,6 +453,273 @@ class WorkflowSchedulerTest {
                     testExecutor.shutdownNow();
                 }
             }
+        }
+    }
+
+    @Test
+    @DisplayName("14. Task with retry policy succeeding on first attempt records 1 attempt and no delay")
+    void firstAttemptSuccessWithRetryPolicy() {
+        TaskGraph graph = TaskGraph.of(List.of("task-1"), List.of());
+        AtomicInteger runCount = new AtomicInteger(0);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("task-1", id -> runCount.incrementAndGet(), RetryPolicy.fixed(3, Duration.ofMillis(50)));
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isTrue();
+            assertThat(result.state()).isEqualTo(WorkflowRunState.COMPLETED);
+            assertThat(runCount.get()).isEqualTo(1);
+
+            TaskExecutionResult taskResult = result.taskResults().get("task-1");
+            assertThat(taskResult.state()).isEqualTo(TaskState.COMPLETED);
+            assertThat(taskResult.getAttemptCount()).isEqualTo(1);
+            assertThat(taskResult.getAttemptErrors()).isEmpty();
+            assertThat(taskResult.getError()).isEmpty();
+            assertThat(taskResult.getStartedAt()).isPresent();
+            assertThat(taskResult.getCompletedAt()).isPresent();
+        }
+    }
+
+    @Test
+    @DisplayName("15. Transient failure followed by success on retry completes workflow successfully")
+    void transientFailureFollowedBySuccess() {
+        TaskGraph graph = TaskGraph.of(List.of("flaky-task"), List.of());
+        AtomicInteger attempts = new AtomicInteger(0);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("flaky-task", id -> {
+                int current = attempts.incrementAndGet();
+                if (current < 3) {
+                    throw new IllegalStateException("Transient failure on attempt " + current);
+                }
+            }, RetryPolicy.fixed(4, Duration.ofMillis(10)));
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isTrue();
+            assertThat(result.state()).isEqualTo(WorkflowRunState.COMPLETED);
+            assertThat(attempts.get()).isEqualTo(3);
+
+            TaskExecutionResult taskResult = result.taskResults().get("flaky-task");
+            assertThat(taskResult.state()).isEqualTo(TaskState.COMPLETED);
+            assertThat(taskResult.getAttemptCount()).isEqualTo(3);
+            assertThat(taskResult.getAttemptErrors()).hasSize(2);
+            assertThat(taskResult.getAttemptErrors().get(0)).hasMessage("Transient failure on attempt 1");
+            assertThat(taskResult.getAttemptErrors().get(1)).hasMessage("Transient failure on attempt 2");
+            assertThat(taskResult.getError()).isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("16. Exhausting all retry attempts triggers terminal failure, records last error, and cancels dependents")
+    void retryExhaustionTriggersTerminalFailure() {
+        TaskGraph graph = TaskGraph.of(
+            List.of("failing-task", "dependent-task"),
+            List.of(new DependencyEdge("failing-task", "dependent-task"))
+        );
+
+        AtomicInteger attempts = new AtomicInteger(0);
+        AtomicBoolean dependentRan = new AtomicBoolean(false);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("failing-task", id -> {
+                int current = attempts.incrementAndGet();
+                throw new RuntimeException("Persistent failure on attempt " + current);
+            }, RetryPolicy.fixed(3, Duration.ofMillis(10)))
+            .register("dependent-task", id -> dependentRan.set(true));
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isFalse();
+            assertThat(result.state()).isEqualTo(WorkflowRunState.FAILED);
+            assertThat(attempts.get()).isEqualTo(3);
+
+            TaskExecutionResult failingResult = result.taskResults().get("failing-task");
+            assertThat(failingResult.state()).isEqualTo(TaskState.FAILED);
+            assertThat(failingResult.getAttemptCount()).isEqualTo(3);
+            assertThat(failingResult.getAttemptErrors()).hasSize(3);
+            assertThat(failingResult.getError()).isPresent();
+            assertThat(failingResult.getError().get())
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("Persistent failure on attempt 3");
+
+            TaskExecutionResult depResult = result.taskResults().get("dependent-task");
+            assertThat(depResult.state()).isEqualTo(TaskState.CANCELLED);
+            assertThat(depResult.getAttemptCount()).isEqualTo(0);
+            assertThat(dependentRan.get()).isFalse();
+        }
+    }
+
+    @Test
+    @DisplayName("17. Non-retryable exception fails immediately on first attempt without retrying")
+    void nonRetryableExceptionFailsImmediately() {
+        TaskGraph graph = TaskGraph.of(List.of("task-1"), List.of());
+        AtomicInteger attempts = new AtomicInteger(0);
+
+        // Retry only IOException, but task throws IllegalArgumentException
+        RetryPolicy policy = RetryPolicy.fixed(5, Duration.ofMillis(10))
+            .withPredicate(t -> t instanceof IOException);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("task-1", id -> {
+                attempts.incrementAndGet();
+                throw new IllegalArgumentException("Non-retryable argument error");
+            }, policy);
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isFalse();
+            assertThat(result.state()).isEqualTo(WorkflowRunState.FAILED);
+            assertThat(attempts.get()).isEqualTo(1);
+
+            TaskExecutionResult taskResult = result.taskResults().get("task-1");
+            assertThat(taskResult.state()).isEqualTo(TaskState.FAILED);
+            assertThat(taskResult.getAttemptCount()).isEqualTo(1);
+            assertThat(taskResult.getAttemptErrors()).hasSize(1);
+            assertThat(taskResult.getError().get())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Non-retryable argument error");
+        }
+    }
+
+    @Test
+    @DisplayName("18. Dependents remain blocked while upstream prerequisite is retrying in backoff")
+    void dependentsBlockedDuringRetries() throws Exception {
+        TaskGraph graph = TaskGraph.of(
+            List.of("parent", "child"),
+            List.of(new DependencyEdge("parent", "child"))
+        );
+
+        AtomicInteger parentAttempts = new AtomicInteger(0);
+        AtomicBoolean childStartedBeforeParentSuccess = new AtomicBoolean(false);
+        AtomicBoolean parentSucceeded = new AtomicBoolean(false);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("parent", id -> {
+                int current = parentAttempts.incrementAndGet();
+                if (current == 1) {
+                    throw new RuntimeException("First attempt fails");
+                }
+                parentSucceeded.set(true);
+            }, RetryPolicy.fixed(2, Duration.ofMillis(50)))
+            .register("child", id -> {
+                if (!parentSucceeded.get()) {
+                    childStartedBeforeParentSuccess.set(true);
+                }
+            });
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isTrue();
+            assertThat(parentAttempts.get()).isEqualTo(2);
+            assertThat(childStartedBeforeParentSuccess.get()).isFalse();
+            assertThat(result.taskResults().get("parent").state()).isEqualTo(TaskState.COMPLETED);
+            assertThat(result.taskResults().get("child").state()).isEqualTo(TaskState.COMPLETED);
+        }
+    }
+
+    @Test
+    @DisplayName("19. Terminal failure on concurrent branch cancels another task waiting in retry backoff")
+    void concurrentTerminalFailureCancelsWaitingRetry() throws Exception {
+        // Branch 1: A (fails attempt 1 and enters backoff)
+        // Branch 2: B (fails terminally, triggering fail-fast)
+        TaskGraph graph = TaskGraph.of(List.of("A", "B"), List.of());
+
+        CountDownLatch aAttempt1Done = new CountDownLatch(1);
+        AtomicInteger aAttempts = new AtomicInteger(0);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("A", id -> {
+                aAttempts.incrementAndGet();
+                aAttempt1Done.countDown();
+                throw new RuntimeException("A attempt 1 fails");
+            }, RetryPolicy.fixed(3, Duration.ofMillis(300)))
+            .register("B", id -> {
+                // Wait until A has failed attempt 1 and entered backoff
+                boolean aFailed = aAttempt1Done.await(5, TimeUnit.SECONDS);
+                if (!aFailed) {
+                    throw new TimeoutException("Timed out waiting for A to fail attempt 1");
+                }
+                throw new RuntimeException("B fatal failure");
+            });
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isFalse();
+            assertThat(result.state()).isEqualTo(WorkflowRunState.FAILED);
+
+            // B failed terminally
+            assertThat(result.taskResults().get("B").state()).isEqualTo(TaskState.FAILED);
+
+            // A had 1 attempt, was waiting in backoff, and was cancelled by fail-fast!
+            TaskExecutionResult aResult = result.taskResults().get("A");
+            assertThat(aResult.state()).isEqualTo(TaskState.CANCELLED);
+            assertThat(aAttempts.get()).as("A must not execute attempt 2 after cancellation").isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisplayName("20. Closing scheduler while retries are waiting cancels timers cleanly")
+    void schedulerCloseWhileRetryWaitingCancelsCleanly() throws Exception {
+        TaskGraph graph = TaskGraph.of(List.of("task-1"), List.of());
+        CountDownLatch attempt1Started = new CountDownLatch(1);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("task-1", id -> {
+                attempt1Started.countDown();
+                throw new RuntimeException("Attempt fails and enters long backoff");
+            }, RetryPolicy.fixed(3, Duration.ofSeconds(10)));
+
+        WorkflowScheduler scheduler = new WorkflowScheduler(2);
+        ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+        try {
+            Future<WorkflowExecutionResult> future = testExecutor.submit(() -> scheduler.execute(graph, registry));
+
+            assertThat(attempt1Started.await(5, TimeUnit.SECONDS)).isTrue();
+
+            // Give a small moment for attempt 1 to complete and schedule the 10s retry
+            Thread.sleep(50);
+
+            // Close scheduler while retry timer is pending
+            scheduler.close();
+            assertThat(scheduler.isClosed()).isTrue();
+
+            WorkflowExecutionResult result = future.get(5, TimeUnit.SECONDS);
+            assertThat(result.isSuccessful()).isFalse();
+            assertThat(result.state()).isEqualTo(WorkflowRunState.FAILED);
+            assertThat(result.taskResults().get("task-1").state()).isEqualTo(TaskState.CANCELLED);
+        } finally {
+            testExecutor.shutdownNow();
+            scheduler.close();
+        }
+    }
+
+    @Test
+    @DisplayName("21. No duplicate execution after timer expiration and cancellation races")
+    void noDuplicateExecutionAfterTimerExpiry() {
+        TaskGraph graph = TaskGraph.of(List.of("task-1"), List.of());
+        AtomicInteger count = new AtomicInteger(0);
+
+        TaskRegistry registry = new TaskRegistry()
+            .register("task-1", id -> {
+                if (count.incrementAndGet() < 2) {
+                    throw new RuntimeException("retry once");
+                }
+            }, RetryPolicy.fixed(2, Duration.ofMillis(5)));
+
+        try (WorkflowScheduler scheduler = new WorkflowScheduler(2)) {
+            WorkflowExecutionResult result = scheduler.execute(graph, registry);
+
+            assertThat(result.isSuccessful()).isTrue();
+            assertThat(count.get()).as("Action must be executed exactly 2 times (attempt 1 and attempt 2)").isEqualTo(2);
+            assertThat(result.taskResults().get("task-1").getAttemptCount()).isEqualTo(2);
         }
     }
 }

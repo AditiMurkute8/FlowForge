@@ -6,6 +6,7 @@ import com.flowforge.core.DependencyEdge;
 import com.flowforge.core.InvalidDagException;
 import com.flowforge.core.TaskGraph;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
@@ -20,8 +21,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class WorkflowScheduler implements AutoCloseable {
 
     private final ExecutorService executor;
+    private final ScheduledExecutorService retryScheduler;
     private final int maxConcurrency;
     private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    private final Set<WorkflowExecutionContext> activeContexts = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     /**
      * Creates a scheduler with the specified maximum concurrency.
@@ -43,6 +47,16 @@ public final class WorkflowScheduler implements AutoCloseable {
                 return t;
             }
         });
+        this.retryScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            private final AtomicInteger counter = new AtomicInteger(1);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "flowforge-retry-timer-" + counter.getAndIncrement());
+                t.setDaemon(true);
+                return t;
+            }
+        });
     }
 
     /**
@@ -53,11 +67,11 @@ public final class WorkflowScheduler implements AutoCloseable {
     }
 
     /**
-     * Executes the given task graph using actions from the registry.
+     * Executes the given task graph using actions and retry policies from the registry.
      * Blocks synchronously until all tasks in the workflow have finished.
      *
      * @param graph the task graph to execute
-     * @param registry the registry containing executable actions for tasks
+     * @param registry the registry containing executable actions and retry policies for tasks
      * @return the workflow execution result
      * @throws InvalidDagException if the DAG contains cycles, duplicate task IDs, duplicate edges, or missing references
      * @throws IllegalStateException if the scheduler is closed or if any task is missing a registered action
@@ -96,7 +110,12 @@ public final class WorkflowScheduler implements AutoCloseable {
 
         // 4. Run the workflow execution
         WorkflowExecutionContext context = new WorkflowExecutionContext(graph, registry, startedAt);
-        return context.run(executor);
+        activeContexts.add(context);
+        try {
+            return context.run(executor, retryScheduler);
+        } finally {
+            activeContexts.remove(context);
+        }
     }
 
     /**
@@ -116,13 +135,21 @@ public final class WorkflowScheduler implements AutoCloseable {
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
+            for (WorkflowExecutionContext context : activeContexts) {
+                context.cancel();
+            }
             executor.shutdown();
+            retryScheduler.shutdown();
             try {
-                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                boolean terminated = executor.awaitTermination(5, TimeUnit.SECONDS);
+                terminated = retryScheduler.awaitTermination(5, TimeUnit.SECONDS) && terminated;
+                if (!terminated) {
                     executor.shutdownNow();
+                    retryScheduler.shutdownNow();
                 }
             } catch (InterruptedException e) {
                 executor.shutdownNow();
+                retryScheduler.shutdownNow();
                 Thread.currentThread().interrupt();
             }
         }
@@ -142,14 +169,22 @@ public final class WorkflowScheduler implements AutoCloseable {
         private boolean hasFailure = false;
         private int activeRunningTasks = 0;
 
+        void cancel() {
+            synchronized (lock) {
+                hasFailure = true;
+                cancelPendingTasksLocked();
+                checkCompletionLocked();
+            }
+        }
+
         WorkflowExecutionContext(TaskGraph graph, TaskRegistry registry, Instant startedAt) {
             this.graph = graph;
             this.registry = registry;
             this.startedAt = startedAt;
 
-            // Initialize task contexts
+            // Initialize task contexts with registered actions and retry policies
             for (String taskId : graph.taskIds()) {
-                taskContexts.put(taskId, new TaskContext(taskId, registry.get(taskId)));
+                taskContexts.put(taskId, new TaskContext(taskId, registry.get(taskId), registry.getRetryPolicy(taskId)));
             }
 
             // Wire dependencies and prerequisite counts
@@ -161,7 +196,7 @@ public final class WorkflowScheduler implements AutoCloseable {
             }
         }
 
-        WorkflowExecutionResult run(ExecutorService executor) {
+        WorkflowExecutionResult run(ExecutorService executor, ScheduledExecutorService retryScheduler) {
             synchronized (lock) {
                 // Find all tasks with zero prerequisites
                 List<TaskContext> initialReady = new ArrayList<>();
@@ -177,7 +212,7 @@ public final class WorkflowScheduler implements AutoCloseable {
                 // Dispatch initial ready tasks to worker pool
                 for (TaskContext tc : initialReady) {
                     try {
-                        executor.submit(() -> executeTask(tc, executor));
+                        executor.submit(() -> executeTask(tc, executor, retryScheduler));
                     } catch (RejectedExecutionException e) {
                         handleRejectionLocked(tc, e);
                         checkCompletionLocked();
@@ -205,7 +240,7 @@ public final class WorkflowScheduler implements AutoCloseable {
             }
         }
 
-        private void executeTask(TaskContext tc, ExecutorService executor) {
+        private void executeTask(TaskContext tc, ExecutorService executor, ScheduledExecutorService retryScheduler) {
             synchronized (lock) {
                 if (hasFailure || tc.state != TaskState.PENDING) {
                     if (tc.state == TaskState.PENDING) {
@@ -216,7 +251,10 @@ public final class WorkflowScheduler implements AutoCloseable {
                     return;
                 }
                 tc.state = TaskState.RUNNING;
-                tc.startedAt = Instant.now();
+                if (tc.startedAt == null) {
+                    tc.startedAt = Instant.now();
+                }
+                tc.attemptCount++;
                 activeRunningTasks++;
             }
 
@@ -229,19 +267,12 @@ public final class WorkflowScheduler implements AutoCloseable {
 
             synchronized (lock) {
                 activeRunningTasks--;
-                tc.completedAt = Instant.now();
 
-                if (taskError != null) {
-                    // Task failed
-                    tc.state = TaskState.FAILED;
-                    tc.error = taskError;
-                    hasFailure = true;
-
-                    // Fail-fast: cancel all tasks still in PENDING
-                    cancelPendingTasksLocked();
-                } else {
-                    // Task completed successfully
+                if (taskError == null) {
+                    // Task attempt completed successfully
                     tc.state = TaskState.COMPLETED;
+                    tc.completedAt = Instant.now();
+                    tc.error = null;
 
                     if (!hasFailure) {
                         // Sort dependents deterministically
@@ -253,7 +284,7 @@ public final class WorkflowScheduler implements AutoCloseable {
                             depCtx.remainingPrerequisites--;
                             if (depCtx.remainingPrerequisites == 0 && depCtx.state == TaskState.PENDING) {
                                 try {
-                                    executor.submit(() -> executeTask(depCtx, executor));
+                                    executor.submit(() -> executeTask(depCtx, executor, retryScheduler));
                                 } catch (RejectedExecutionException e) {
                                     handleRejectionLocked(depCtx, e);
                                     break;
@@ -261,9 +292,59 @@ public final class WorkflowScheduler implements AutoCloseable {
                             }
                         }
                     }
-                }
+                    checkCompletionLocked();
+                } else {
+                    tc.attemptErrors.add(taskError);
+                    tc.error = taskError;
 
-                checkCompletionLocked();
+                    boolean canRetry = !hasFailure
+                        && tc.attemptCount < tc.retryPolicy.maxAttempts()
+                        && tc.retryPolicy.isRetryable(taskError);
+
+                    if (canRetry) {
+                        tc.state = TaskState.PENDING;
+                        Duration delay = tc.retryPolicy.computeDelay(tc.attemptCount);
+
+                        if (delay.isZero() || delay.isNegative()) {
+                            try {
+                                executor.submit(() -> executeTask(tc, executor, retryScheduler));
+                            } catch (RejectedExecutionException e) {
+                                handleRejectionLocked(tc, e);
+                                checkCompletionLocked();
+                            }
+                        } else {
+                            try {
+                                tc.scheduledRetry = retryScheduler.schedule(() -> {
+                                    synchronized (lock) {
+                                        tc.scheduledRetry = null;
+                                        if (!hasFailure && tc.state == TaskState.PENDING) {
+                                            try {
+                                                executor.submit(() -> executeTask(tc, executor, retryScheduler));
+                                            } catch (RejectedExecutionException e) {
+                                                handleRejectionLocked(tc, e);
+                                                checkCompletionLocked();
+                                            }
+                                        } else {
+                                            checkCompletionLocked();
+                                        }
+                                    }
+                                }, delay.toMillis(), TimeUnit.MILLISECONDS);
+                            } catch (RejectedExecutionException e) {
+                                handleRejectionLocked(tc, e);
+                                checkCompletionLocked();
+                            }
+                        }
+                    } else {
+                        // Terminal failure: exhausted attempts or non-retryable error
+                        tc.state = TaskState.FAILED;
+                        tc.completedAt = Instant.now();
+                        hasFailure = true;
+
+                        // Fail-fast: cancel all tasks still in PENDING and cancel scheduled retries
+                        cancelPendingTasksLocked();
+                        checkCompletionLocked();
+                    }
+                }
             }
         }
 
@@ -277,6 +358,10 @@ public final class WorkflowScheduler implements AutoCloseable {
 
         private void cancelPendingTasksLocked() {
             for (TaskContext other : taskContexts.values()) {
+                if (other.scheduledRetry != null) {
+                    other.scheduledRetry.cancel(false);
+                    other.scheduledRetry = null;
+                }
                 if (other.state == TaskState.PENDING) {
                     other.state = TaskState.CANCELLED;
                     other.completedAt = Instant.now();
@@ -305,20 +390,33 @@ public final class WorkflowScheduler implements AutoCloseable {
     private static final class TaskContext {
         final String taskId;
         final TaskAction action;
+        final RetryPolicy retryPolicy;
         final List<String> dependents = new ArrayList<>();
         int remainingPrerequisites = 0;
         TaskState state = TaskState.PENDING;
         Instant startedAt;
         Instant completedAt;
         Throwable error;
+        int attemptCount = 0;
+        final List<Throwable> attemptErrors = new ArrayList<>();
+        ScheduledFuture<?> scheduledRetry;
 
-        TaskContext(String taskId, TaskAction action) {
+        TaskContext(String taskId, TaskAction action, RetryPolicy retryPolicy) {
             this.taskId = taskId;
             this.action = action;
+            this.retryPolicy = retryPolicy != null ? retryPolicy : RetryPolicy.none();
         }
 
         TaskExecutionResult toResult() {
-            return new TaskExecutionResult(taskId, state, error, startedAt, completedAt);
+            return new TaskExecutionResult(
+                taskId,
+                state,
+                error,
+                startedAt,
+                completedAt,
+                attemptCount,
+                attemptErrors
+            );
         }
     }
 }
