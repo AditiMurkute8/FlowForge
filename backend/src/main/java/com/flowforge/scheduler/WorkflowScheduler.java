@@ -126,6 +126,13 @@ public final class WorkflowScheduler implements AutoCloseable {
     }
 
     /**
+     * Returns true if all worker and retry timer executor tasks have completed and all threads have terminated.
+     */
+    public boolean isTerminated() {
+        return executor.isTerminated() && retryScheduler.isTerminated();
+    }
+
+    /**
      * Returns the configured maximum concurrency.
      */
     public int getMaxConcurrency() {
