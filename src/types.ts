@@ -66,3 +66,89 @@ export interface DagValidationResult {
   errors: string[];
   warnings: string[];
 }
+
+// --- Backend REST API DTOs & Enums ---
+
+export interface EdgeDto {
+  source: string;
+  target: string;
+}
+
+export interface ValidateDagRequest {
+  taskIds: string[];
+  edges: EdgeDto[];
+}
+
+export interface ValidateDagResponse {
+  isValid: boolean;
+  hasCycle: boolean;
+  errors: string[];
+  warnings: string[];
+  cycleNodes: string[];
+  disconnectedNodes: string[];
+  topologicalOrder: string[];
+}
+
+export type TaskActionType = 'NO_OP' | 'DELAY' | 'FAIL' | 'FAIL_UNTIL_ATTEMPT';
+
+export interface TaskActionDto {
+  type: TaskActionType;
+  delayMs?: number;
+  failUntilAttempt?: number;
+  errorMessage?: string;
+}
+
+export type BackoffStrategy = 'NONE' | 'FIXED' | 'EXPONENTIAL';
+export type JitterStrategy = 'NONE' | 'FULL';
+
+export interface RetryPolicyDto {
+  maxAttempts?: number;
+  backoffStrategy?: BackoffStrategy;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  backoffMultiplier?: number;
+  jitterStrategy?: JitterStrategy;
+}
+
+export interface TaskDefinitionDto {
+  id: string;
+  action?: TaskActionDto;
+  retryPolicy?: RetryPolicyDto;
+}
+
+export interface ExecuteWorkflowRequest {
+  tasks: TaskDefinitionDto[];
+  edges: EdgeDto[];
+  concurrency?: number;
+}
+
+export type WorkflowRunState = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+
+export type BackendTaskState = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+
+export interface TaskExecutionResponseDto {
+  taskId: string;
+  state: BackendTaskState;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  attemptCount: number;
+  errorMessage: string | null;
+  attemptErrors: string[];
+}
+
+export interface ExecuteWorkflowResponse {
+  state: WorkflowRunState;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  taskResults: Record<string, TaskExecutionResponseDto>;
+}
+
+export interface ApiErrorResponse {
+  status: number;
+  error: string;
+  message: string;
+  timestamp: string;
+  details: string[];
+}
