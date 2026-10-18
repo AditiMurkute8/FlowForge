@@ -33,7 +33,7 @@ export type TaskType =
   | 'LLM_PROMPT'
   | 'DELAY_WAIT';
 
-export type TaskStatus = 'IDLE' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type TaskStatus = 'IDLE' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 export interface TaskNodeData {
   [key: string]: unknown;
@@ -41,7 +41,7 @@ export interface TaskNodeData {
   taskType: TaskType;
   timeoutMs: number;
   maxRetries: number;
-  parameters: Record<string, string>;
+  parameters: Record<string, unknown>;
   status?: TaskStatus;
   executionDurationMs?: number;
   isCycle?: boolean;

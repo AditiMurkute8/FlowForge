@@ -1,6 +1,7 @@
 import React from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { TaskNodeData, TaskType } from '../../types';
+import { extractSimulationConfig } from '../../utils/workflowExecutionAdapters';
 import {
   Globe,
   Terminal,
@@ -11,6 +12,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  Ban,
 } from 'lucide-react';
 
 const taskIcons: Record<TaskType, React.ReactNode> = {
@@ -31,6 +33,25 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
   selected,
 }) => {
   const isCycleNode = (data as Record<string, unknown>).isCycle === true;
+
+  const simConfig = extractSimulationConfig(data.parameters);
+  const resolvedAction = simConfig.hasExplicitOverride
+    ? simConfig.action ?? (simConfig.isMalformed ? 'MALFORMED' : simConfig.rawActionName ?? 'UNKNOWN')
+    : data.taskType === 'DELAY_WAIT'
+    ? 'DELAY'
+    : 'NO_OP';
+
+  const isMalformedSim =
+    simConfig.hasExplicitOverride && (simConfig.isMalformed || !simConfig.action);
+
+  const isInvalidRetries =
+    typeof data.maxRetries === 'number' &&
+    (data.maxRetries < 0 || data.maxRetries > 4 || !Number.isInteger(data.maxRetries));
+
+  const rawDelay =
+    simConfig.hasExplicitOverride && simConfig.rawDelay !== undefined
+      ? simConfig.rawDelay
+      : data.parameters?.delayMs ?? data.parameters?.delay;
 
   const renderStatus = () => {
     switch (data.status) {
@@ -53,6 +74,13 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
           <span className="flex items-center gap-1 text-[10px] font-mono text-[var(--status-red-text)]">
             <AlertCircle size={10} />
             failed
+          </span>
+        );
+      case 'CANCELLED':
+        return (
+          <span className="flex items-center gap-1 text-[10px] font-mono text-[var(--status-yellow-text)]">
+            <Ban size={10} />
+            cancelled
           </span>
         );
       default:
@@ -99,7 +127,36 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
         <div className="mt-1 flex items-center gap-1.5 text-[10px] font-mono text-[var(--text-muted)]">
           <span>{data.timeoutMs / 1000}s timeout</span>
           <span>•</span>
-          <span>{data.maxRetries} retries</span>
+          <span className={isInvalidRetries ? 'text-[var(--status-red-text)] font-semibold' : ''}>
+            {data.maxRetries} {data.maxRetries === 1 ? 'retry' : 'retries'}
+            {isInvalidRetries ? ' (!)' : ''}
+          </span>
+        </div>
+        <div className="mt-1 flex items-center justify-between text-[9px] font-mono pt-1 border-t border-[var(--border-default)]/60">
+          <span className="text-[var(--text-muted)]">sim:</span>
+          {isMalformedSim ? (
+            <span
+              className="text-[var(--status-red-text)] font-semibold truncate max-w-[130px]"
+              title={simConfig.malformedReason ?? `Unsupported action "${simConfig.rawActionName}"`}
+            >
+              {simConfig.rawActionName || 'MALFORMED'}
+            </span>
+          ) : (
+            <span
+              className={
+                simConfig.hasExplicitOverride
+                  ? 'text-[var(--accent-blue)] font-medium truncate max-w-[130px]'
+                  : 'text-[var(--text-muted)] truncate max-w-[130px]'
+              }
+            >
+              {resolvedAction}
+              {resolvedAction === 'DELAY' && rawDelay !== undefined
+                ? ` (${rawDelay}ms)`
+                : resolvedAction === 'DELAY' && data.taskType === 'DELAY_WAIT'
+                ? ' (500ms)'
+                : ''}
+            </span>
+          )}
         </div>
       </div>
 
