@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -14,16 +14,27 @@ import {
   type Node,
 } from '@xyflow/react';
 import { INITIAL_DAG_NODES, INITIAL_DAG_EDGES } from '../mockData';
-import type { TaskNodeData, TaskType, DagValidationResult } from '../types';
+import type {
+  TaskNodeData,
+  TaskType,
+  TaskStatus,
+  DagValidationResult,
+  ExecuteWorkflowRequest,
+  ExecuteWorkflowResponse,
+} from '../types';
 import { CustomTaskNode } from '../components/workflow/CustomTaskNode';
 import { TaskPalette } from '../components/workflow/TaskPalette';
 import { TaskInspector } from '../components/workflow/TaskInspector';
+import { ExecutionModal } from '../components/workflow/ExecutionModal';
 import {
   executeWorkflowValidation,
 } from '../utils/dagValidationAdapters';
+import {
+  executeWorkflowRun,
+  type ExecutionRunResult,
+} from '../utils/workflowExecutionAdapters';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
-import { Modal } from '../components/ui/Modal';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -33,18 +44,21 @@ import {
   AlertCircle,
   RotateCcw,
   Maximize2,
+  Loader2,
 } from 'lucide-react';
 
 interface WorkflowBuilderProps {
   onBackToProjects: () => void;
   onShowToast: (title: string, message?: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
   theme?: 'light' | 'dark';
+  executeApiFn?: (request: ExecuteWorkflowRequest) => Promise<ExecuteWorkflowResponse>;
 }
 
 const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   onBackToProjects,
   onShowToast,
   theme = 'dark',
+  executeApiFn,
 }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TaskNodeData>>(INITIAL_DAG_NODES);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(INITIAL_DAG_EDGES);
@@ -54,8 +68,33 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   const [validationResult, setValidationResult] = useState<DagValidationResult | null>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [isSimulateRunModalOpen, setIsSimulateRunModalOpen] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [executionResult, setExecutionResult] = useState<ExecutionRunResult | null>(null);
+
+  // Synchronous in-flight execution lock to prevent race conditions from rapid duplicate triggers
+  const isExecutingRef = useRef<boolean>(false);
+  // Monotonically increasing run ID to ignore stale responses if the graph is edited while in flight
+  const activeRunIdRef = useRef<number>(0);
 
   const nodeTypes = useMemo(() => ({ customTask: CustomTaskNode }), []);
+
+  // Helper to reset execution results and revert non-IDLE canvas node statuses when the graph is modified
+  const resetStaleExecution = useCallback(() => {
+    // Invalidate in-flight execution run so late responses are ignored
+    activeRunIdRef.current += 1;
+    setExecutionResult(null);
+    setNodes((nds) => {
+      const hasNonIdle = nds.some((n) => n.data.status && n.data.status !== 'IDLE');
+      if (!hasNonIdle) return nds;
+      return nds.map((n) => ({
+        ...n,
+        data: {
+          ...n.data,
+          status: 'IDLE' as TaskStatus,
+        },
+      }));
+    });
+  }, [setNodes]);
 
   // Ensure initial DAG is centered and correctly fitted on mount
   useEffect(() => {
@@ -78,8 +117,9 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
         )
       );
       setValidationResult(null);
+      resetStaleExecution();
     },
-    [setEdges]
+    [setEdges, resetStaleExecution]
   );
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
@@ -113,9 +153,12 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     setNodes((nds) => [...nds, newNode]);
     setSelectedNodeId(newNodeId);
     onShowToast('Task Placed', `Added "${label}" to canvas.`);
+    setValidationResult(null);
+    resetStaleExecution();
   };
 
   const handleUpdateNode = (nodeId: string, updatedData: Partial<TaskNodeData>) => {
+    activeRunIdRef.current += 1;
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === nodeId) {
@@ -124,12 +167,14 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
             data: {
               ...node.data,
               ...updatedData,
+              status: 'IDLE' as TaskStatus,
             },
           };
         }
         return node;
       })
     );
+    setExecutionResult(null);
   };
 
   const handleDeleteNode = (nodeId: string) => {
@@ -137,16 +182,59 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
     setSelectedNodeId(null);
     onShowToast('Task Removed', 'Node removed from pipeline.');
+    setValidationResult(null);
+    resetStaleExecution();
   };
 
   const handleResetGraph = () => {
+    activeRunIdRef.current += 1;
     setNodes(INITIAL_DAG_NODES);
     setEdges(INITIAL_DAG_EDGES);
     setSelectedNodeId(null);
     setValidationResult(null);
+    setExecutionResult(null);
     fitView({ padding: 0.25, duration: 200 });
     onShowToast('Pipeline Reset', 'Restored 4-node sample DAG.');
   };
+
+  const handleRunSimulation = useCallback(async () => {
+    // Synchronous guard: If already in flight, reopen modal without dispatching duplicate request
+    if (isExecutingRef.current || isExecuting) {
+      setIsSimulateRunModalOpen(true);
+      return;
+    }
+
+    isExecutingRef.current = true;
+    setIsSimulateRunModalOpen(true);
+
+    const currentRunId = activeRunIdRef.current + 1;
+    activeRunIdRef.current = currentRunId;
+
+    try {
+      await executeWorkflowRun({
+        nodes,
+        edges,
+        isExecuting: false,
+        setIsExecuting,
+        onExecutionComplete: (result) => {
+          // Discard results if graph has been edited/reset since this run started
+          if (activeRunIdRef.current !== currentRunId) return;
+          setExecutionResult(result);
+        },
+        onUpdateNodeStatus: (nodeId, status) => {
+          // Discard status updates if graph has been edited/reset since this run started
+          if (activeRunIdRef.current !== currentRunId) return;
+          setNodes((nds) =>
+            nds.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, status } } : n))
+          );
+        },
+        onShowToast,
+        executeApiFn,
+      });
+    } finally {
+      isExecutingRef.current = false;
+    }
+  }, [nodes, edges, isExecuting, onShowToast, setNodes, executeApiFn]);
 
   const applyValidationVisuals = useCallback(
     (result: DagValidationResult) => {
@@ -275,10 +363,17 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
           <Button
             variant="primary"
             size="sm"
-            icon={<Play size={12} />}
-            onClick={() => setIsSimulateRunModalOpen(true)}
+            icon={isExecuting ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+            onClick={() => {
+              if (isExecuting) {
+                setIsSimulateRunModalOpen(true);
+              } else {
+                void handleRunSimulation();
+              }
+            }}
+            data-testid="run-simulated-button"
           >
-            Run (Simulated)
+            {isExecuting ? 'View Active Run...' : 'Run (Simulated)'}
           </Button>
         </div>
       </div>
@@ -373,45 +468,14 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
       </div>
 
       {/* Simulated Execution Modal */}
-      <Modal
+      <ExecutionModal
         isOpen={isSimulateRunModalOpen}
         onClose={() => setIsSimulateRunModalOpen(false)}
-        title="Simulated Pipeline Execution"
-        description="Phase 0 UI Foundation Scope Boundary"
-        footer={
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => setIsSimulateRunModalOpen(false)}
-          >
-            Close
-          </Button>
-        }
-      >
-        <div className="space-y-3 text-xs">
-          <div className="rounded-[5px] border border-[var(--status-yellow-border)] bg-[var(--status-yellow-bg)] p-3 text-[var(--status-yellow-text)] flex items-start gap-2.5">
-            <AlertTriangle size={15} className="shrink-0 mt-0.5" />
-            <div>
-              <strong className="block font-medium">Phase 0 Architecture Boundary</strong>
-              <span>
-                Task execution is simulated in the browser. Spring Boot scheduler, worker leases, and PostgreSQL persistence are scheduled for Phase 1.
-              </span>
-            </div>
-          </div>
-
-          <div className="rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-3 font-mono text-[11px] space-y-1.5 text-[var(--text-secondary)]">
-            <div className="text-[var(--accent-blue)]">[DRY-RUN] Validating graph topology...</div>
-            <div className="text-[var(--status-green-text)]">✔ Structure: 4 tasks, 4 edges, acyclic verified</div>
-            <div>▶ [Task 1] Fetch Clickstream API (HTTP GET 200 OK — 420ms)</div>
-            <div>▶ [Task 2] Deduplicate & Cleanse (Cleaned 14,200 records — 1850ms)</div>
-            <div>▶ [Task 3] Verify Schema Hash (Avro schema valid — 610ms)</div>
-            <div>▶ [Task 4] Load to Data Warehouse (Transaction ready)</div>
-            <div className="text-[var(--status-green-text)] font-semibold pt-1">
-              ✔ Simulated run completed with 0 errors.
-            </div>
-          </div>
-        </div>
-      </Modal>
+        isExecuting={isExecuting}
+        executionResult={executionResult}
+        onRunExecution={handleRunSimulation}
+        nodes={nodes}
+      />
     </div>
   );
 };
