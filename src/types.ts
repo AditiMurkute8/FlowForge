@@ -65,6 +65,8 @@ export interface DagValidationResult {
   disconnectedNodes: string[];
   errors: string[];
   warnings: string[];
+  topologicalOrder?: string[];
+  isLocalFallback?: boolean;
 }
 
 // --- Backend REST API DTOs & Enums ---

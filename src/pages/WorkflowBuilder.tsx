@@ -18,7 +18,9 @@ import type { TaskNodeData, TaskType, DagValidationResult } from '../types';
 import { CustomTaskNode } from '../components/workflow/CustomTaskNode';
 import { TaskPalette } from '../components/workflow/TaskPalette';
 import { TaskInspector } from '../components/workflow/TaskInspector';
-import { validateDag } from '../utils/dagValidation';
+import {
+  executeWorkflowValidation,
+} from '../utils/dagValidationAdapters';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Modal } from '../components/ui/Modal';
@@ -50,6 +52,7 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [validationResult, setValidationResult] = useState<DagValidationResult | null>(null);
+  const [isValidating, setIsValidating] = useState(false);
   const [isSimulateRunModalOpen, setIsSimulateRunModalOpen] = useState(false);
 
   const nodeTypes = useMemo(() => ({ customTask: CustomTaskNode }), []);
@@ -145,53 +148,55 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     onShowToast('Pipeline Reset', 'Restored 4-node sample DAG.');
   };
 
-  const handleValidateDag = () => {
-    const result = validateDag(nodes, edges);
-    setValidationResult(result);
-
-    if (result.hasCycle) {
-      setEdges((eds) =>
-        eds.map((edge) => ({
-          ...edge,
-          className: result.cycleEdges.includes(edge.id) ? 'cycle-edge' : '',
-        }))
-      );
-      setNodes((nds) =>
-        nds.map((node) => ({
-          ...node,
-          data: {
-            ...node.data,
-            isCycle: result.cycleNodes.includes(node.id),
-          },
-        }))
-      );
-      onShowToast(
-        'Validation Failed',
-        'Cycles detected in directed pipeline.',
-        'error'
-      );
-    } else {
-      setEdges((eds) =>
-        eds.map((edge) => ({
-          ...edge,
-          className: '',
-        }))
-      );
-      setNodes((nds) =>
-        nds.map((node) => {
-          const { isCycle: _, ...rest } = node.data as Record<string, unknown>;
-          return {
+  const applyValidationVisuals = useCallback(
+    (result: DagValidationResult) => {
+      if (result.hasCycle) {
+        setEdges((eds) =>
+          eds.map((edge) => ({
+            ...edge,
+            className: result.cycleEdges.includes(edge.id) ? 'cycle-edge' : '',
+          }))
+        );
+        setNodes((nds) =>
+          nds.map((node) => ({
             ...node,
-            data: rest as TaskNodeData,
-          };
-        })
-      );
-      onShowToast(
-        'DAG Validated',
-        'Workflow graph is acyclic and valid.',
-        'success'
-      );
-    }
+            data: {
+              ...node.data,
+              isCycle: result.cycleNodes.includes(node.id),
+            },
+          }))
+        );
+      } else {
+        setEdges((eds) =>
+          eds.map((edge) => ({
+            ...edge,
+            className: '',
+          }))
+        );
+        setNodes((nds) =>
+          nds.map((node) => {
+            const { isCycle: _, ...rest } = node.data as Record<string, unknown>;
+            return {
+              ...node,
+              data: rest as TaskNodeData,
+            };
+          })
+        );
+      }
+    },
+    [setEdges, setNodes]
+  );
+
+  const handleValidateDag = () => {
+    void executeWorkflowValidation({
+      nodes,
+      edges,
+      isValidating,
+      setIsValidating,
+      setValidationResult,
+      applyValidationVisuals,
+      onShowToast,
+    });
   };
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) || null;
@@ -250,8 +255,10 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
             size="sm"
             icon={<CheckCircle2 size={12} />}
             onClick={handleValidateDag}
+            isLoading={isValidating}
+            disabled={isValidating}
           >
-            Validate
+            {isValidating ? 'Validating...' : 'Validate'}
           </Button>
 
           <Button
@@ -287,10 +294,25 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
               : 'border-[var(--status-yellow-border)] bg-[var(--status-yellow-bg)] text-[var(--status-yellow-text)]'
           }`}
         >
+          {validationResult.isLocalFallback && (
+            <Badge variant="warning" size="sm" className="mr-1 shrink-0">
+              Local Only (Server Offline)
+            </Badge>
+          )}
+          {!validationResult.isLocalFallback && validationResult.isValid && (
+            <Badge variant="success" size="sm" className="mr-1 shrink-0">
+              Server Verified
+            </Badge>
+          )}
           {validationResult.isValid && validationResult.warnings.length === 0 ? (
             <>
               <CheckCircle2 size={13} className="shrink-0" />
-              <span>DAG Valid: Acyclic directed graph ready for execution.</span>
+              <span>
+                DAG Valid: Acyclic directed graph ready for execution.
+                {validationResult.topologicalOrder && validationResult.topologicalOrder.length > 0
+                  ? ` Deterministic order: [${validationResult.topologicalOrder.join(' \u2192 ')}]`
+                  : ''}
+              </span>
             </>
           ) : validationResult.hasCycle || validationResult.errors.length > 0 ? (
             <>
