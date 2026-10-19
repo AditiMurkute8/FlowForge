@@ -17,6 +17,7 @@ function isEditableElement(event: KeyboardEvent): boolean {
 
 export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<'projects' | 'builder'>('projects');
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -90,17 +91,15 @@ export const App: React.FC = () => {
     >
       {currentTab === 'projects' ? (
         <ProjectsDashboard
-          onOpenWorkflow={() => {
+          onOpenWorkflow={(projectId) => {
+            setSelectedProjectId(projectId);
             setCurrentTab('builder');
-            showToast(
-              'Workflow Loaded',
-              'Opened "Clickstream Ingestion & Deduplication" in DAG Builder.',
-              'success'
-            );
           }}
+          onShowToast={showToast}
         />
       ) : (
         <WorkflowBuilder
+          projectId={selectedProjectId || undefined}
           onBackToProjects={() => setCurrentTab('projects')}
           onShowToast={showToast}
           theme={theme}

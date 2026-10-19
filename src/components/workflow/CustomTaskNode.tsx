@@ -32,12 +32,13 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
   data,
   selected,
 }) => {
-  const isCycleNode = (data as Record<string, unknown>).isCycle === true;
+  const nodeData = data || ({} as Partial<TaskNodeData>);
+  const isCycleNode = (nodeData as Record<string, unknown>).isCycle === true;
 
-  const simConfig = extractSimulationConfig(data.parameters);
+  const simConfig = extractSimulationConfig(nodeData.parameters);
   const resolvedAction = simConfig.hasExplicitOverride
     ? simConfig.action ?? (simConfig.isMalformed ? 'MALFORMED' : simConfig.rawActionName ?? 'UNKNOWN')
-    : data.taskType === 'DELAY_WAIT'
+    : nodeData.taskType === 'DELAY_WAIT'
     ? 'DELAY'
     : 'NO_OP';
 
@@ -45,21 +46,37 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
     simConfig.hasExplicitOverride && (simConfig.isMalformed || !simConfig.action);
 
   const isInvalidRetries =
-    typeof data.maxRetries === 'number' &&
-    (data.maxRetries < 0 || data.maxRetries > 4 || !Number.isInteger(data.maxRetries));
+    typeof nodeData.maxRetries === 'number' &&
+    (nodeData.maxRetries < 0 || nodeData.maxRetries > 4 || !Number.isInteger(nodeData.maxRetries));
 
   const rawDelay =
     simConfig.hasExplicitOverride && simConfig.rawDelay !== undefined
       ? simConfig.rawDelay
-      : data.parameters?.delayMs ?? data.parameters?.delay;
+      : nodeData.parameters?.delayMs ?? nodeData.parameters?.delay;
+
+  const taskTypeString = typeof nodeData.taskType === 'string' && nodeData.taskType.trim() ? nodeData.taskType : 'TASK';
+  const taskIcon =
+    (nodeData.taskType && taskIcons[nodeData.taskType as TaskType]) || (
+      <Code2 size={12} className="text-[var(--text-muted)]" />
+    );
+
+  const displayTimeout =
+    typeof nodeData.timeoutMs === 'number' && !isNaN(nodeData.timeoutMs)
+      ? `${nodeData.timeoutMs / 1000}s`
+      : '30s';
+
+  const displayRetries =
+    typeof nodeData.maxRetries === 'number' && !isNaN(nodeData.maxRetries)
+      ? nodeData.maxRetries
+      : 3;
 
   const renderStatus = () => {
-    switch (data.status) {
+    switch (nodeData.status) {
       case 'COMPLETED':
         return (
           <span className="flex items-center gap-1 text-[10px] font-mono text-[var(--status-green-text)]">
             <CheckCircle2 size={10} />
-            {data.executionDurationMs ? `${data.executionDurationMs}ms` : 'done'}
+            {nodeData.executionDurationMs ? `${nodeData.executionDurationMs}ms` : 'done'}
           </span>
         );
       case 'RUNNING':
@@ -111,9 +128,9 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
       {/* Node Header */}
       <div className="flex items-center justify-between border-b border-[var(--border-default)] bg-[var(--bg-subsurface)] px-2.5 py-1.5 rounded-t-[5px]">
         <div className="flex items-center gap-1.5">
-          {taskIcons[data.taskType]}
+          {taskIcon}
           <span className="text-[10px] font-mono font-medium text-[var(--text-muted)] uppercase tracking-wider">
-            {data.taskType.replace('_', ' ')}
+            {taskTypeString.replace(/_/g, ' ')}
           </span>
         </div>
         {renderStatus()}
@@ -122,13 +139,13 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
       {/* Node Title & Metadata */}
       <div className="px-2.5 py-2">
         <h4 className="text-xs font-semibold text-[var(--text-primary)] truncate">
-          {data.label}
+          {nodeData.label || 'Unnamed Task'}
         </h4>
         <div className="mt-1 flex items-center gap-1.5 text-[10px] font-mono text-[var(--text-muted)]">
-          <span>{data.timeoutMs / 1000}s timeout</span>
+          <span>{displayTimeout} timeout</span>
           <span>•</span>
           <span className={isInvalidRetries ? 'text-[var(--status-red-text)] font-semibold' : ''}>
-            {data.maxRetries} {data.maxRetries === 1 ? 'retry' : 'retries'}
+            {displayRetries} {displayRetries === 1 ? 'retry' : 'retries'}
             {isInvalidRetries ? ' (!)' : ''}
           </span>
         </div>
@@ -152,7 +169,7 @@ export const CustomTaskNode: React.FC<CustomTaskNodeProps> = ({
               {resolvedAction}
               {resolvedAction === 'DELAY' && rawDelay !== undefined
                 ? ` (${rawDelay}ms)`
-                : resolvedAction === 'DELAY' && data.taskType === 'DELAY_WAIT'
+                : resolvedAction === 'DELAY' && nodeData.taskType === 'DELAY_WAIT'
                 ? ' (500ms)'
                 : ''}
             </span>

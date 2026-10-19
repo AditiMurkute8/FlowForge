@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import React from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import type { TaskNodeData } from '../../types';
 import { CustomTaskNode } from './CustomTaskNode';
@@ -293,6 +294,53 @@ describe('TaskNode and TaskInspector Phase 2 Integration', () => {
       expect(req.edges[0]).toEqual({ source: 'n1', target: 'n2' });
       expect(req.tasks[0].action).toEqual({ type: 'DELAY', delayMs: 2000 });
       expect(req.tasks[1].action).toEqual({ type: 'NO_OP' });
+    });
+  });
+
+  describe('CustomTaskNode robust rendering for legacy or incomplete persisted data', () => {
+    it('safely renders nodes with unknown task types without throwing', () => {
+      const element = CustomTaskNode({
+        id: 'task-1',
+        data: {
+          label: 'Data Extraction',
+          taskType: 'DATA_SOURCE' as unknown as TaskNodeData['taskType'],
+        } as TaskNodeData,
+        selected: false,
+      } as any);
+
+      expect(React.isValidElement(element)).toBe(true);
+      if (React.isValidElement(element)) {
+        expect(element.type).toBe('div');
+      }
+    });
+
+    it('safely handles missing timeoutMs and maxRetries without NaN or crashes', () => {
+      const element = CustomTaskNode({
+        id: 'task-2',
+        data: {
+          label: 'Transformation',
+          taskType: 'TRANSFORM' as unknown as TaskNodeData['taskType'],
+        } as TaskNodeData,
+        selected: false,
+      } as any);
+
+      expect(React.isValidElement(element)).toBe(true);
+      if (React.isValidElement(element)) {
+        expect(element.type).toBe('div');
+      }
+    });
+
+    it('safely handles missing label and empty data', () => {
+      const element = CustomTaskNode({
+        id: 'task-empty',
+        data: {} as TaskNodeData,
+        selected: false,
+      } as any);
+
+      expect(React.isValidElement(element)).toBe(true);
+      if (React.isValidElement(element)) {
+        expect(element.type).toBe('div');
+      }
     });
   });
 });

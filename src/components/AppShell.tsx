@@ -19,7 +19,7 @@ export const AppShell: React.FC<AppShellProps> = ({
   onToggleTheme,
 }) => {
   return (
-    <div className="min-h-screen flex flex-col bg-[var(--bg-canvas)] text-[var(--text-primary)]">
+    <div className="h-full min-h-0 flex flex-col bg-[var(--bg-canvas)] text-[var(--text-primary)]">
       {/* Simulation Boundary Banner */}
       <div className="w-full bg-[var(--bg-surface)] border-b border-[var(--border-default)] px-4 py-1.5 flex items-center justify-between text-[11px] text-[var(--text-secondary)]">
         <div className="flex items-center gap-2 mx-auto">

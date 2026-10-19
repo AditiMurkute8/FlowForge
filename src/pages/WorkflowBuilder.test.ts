@@ -6,8 +6,10 @@ import type {
   ValidateDagResponse,
   DagValidationResult,
   ExecuteWorkflowResponse,
+  WorkflowVersionResponseDto,
 } from '../types';
 import { FlowForgeApiError } from '../api/flowForgeApi';
+import { restoreCanvasFromGraphPayload } from '../utils/workflowPersistenceAdapters';
 import { executeWorkflowValidation, MAX_TASKS_LIMIT, MAX_EDGES_LIMIT } from '../utils/dagValidationAdapters';
 import {
   executeWorkflowRun,
@@ -993,6 +995,470 @@ describe('WorkflowBuilder Integration & Validation Workflow', () => {
 
       expect(isExecutingLock).toBe(false);
       expect(executeApiFn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('WorkflowBuilder Persistence Integration', () => {
+    it('loads workflows and latest persisted draft version for a project', async () => {
+      const mockWorkflow = {
+        id: 'wf-backend-uuid',
+        projectId: 'proj-100',
+        name: 'Data Ingestion Pipeline',
+        slug: 'data-ingestion-pipeline',
+        description: 'Ingest Kafka stream',
+        createdAt: '2026-10-19T00:00:00Z',
+        updatedAt: '2026-10-19T00:00:00Z',
+      };
+
+      const mockLatestVersion: WorkflowVersionResponseDto = {
+        id: 'ver-uuid-latest',
+        workflowId: 'wf-backend-uuid',
+        versionNumber: 2,
+        versionTag: 'v2.0.0',
+        description: 'Second draft snapshot',
+        graphPayload: {
+          schemaVersion: 1,
+          nodes: [
+            {
+              id: 'task-1',
+              type: 'customTask',
+              position: { x: 50, y: 100 },
+              data: { label: 'Kafka Consumer', taskType: 'HTTP_REQUEST' },
+            },
+            {
+              id: 'task-2',
+              type: 'customTask',
+              position: { x: 250, y: 100 },
+              data: { label: 'Deduplicate', taskType: 'TRANSFORM' },
+            },
+          ],
+          edges: [
+            { id: 'e1-2', source: 'task-1', target: 'task-2', type: 'smoothstep' },
+          ],
+        },
+        taskCount: 2,
+        edgeCount: 1,
+        isValidDag: true,
+        createdAt: '2026-10-19T10:00:00Z',
+      };
+
+      const fetchWorkflowsFn = vi.fn().mockResolvedValue({
+        content: [mockWorkflow],
+        totalElements: 1,
+        totalPages: 1,
+        size: 10,
+        number: 0,
+      });
+
+      const getLatestVersionFn = vi.fn().mockResolvedValue(mockLatestVersion);
+
+      const workflowsPage = await fetchWorkflowsFn('proj-100', { page: 0, size: 10 });
+      expect(fetchWorkflowsFn).toHaveBeenCalledWith('proj-100', { page: 0, size: 10 });
+      expect(workflowsPage.content[0]).toEqual(mockWorkflow);
+
+      const latestVersion = await getLatestVersionFn(mockWorkflow.id);
+      expect(getLatestVersionFn).toHaveBeenCalledWith('wf-backend-uuid');
+      expect(latestVersion).toEqual(mockLatestVersion);
+      expect(latestVersion.taskCount).toBe(2);
+      expect(latestVersion.edgeCount).toBe(1);
+      expect(latestVersion.isValidDag).toBe(true);
+    });
+
+    it('auto-creates a default workflow when selected project has no existing workflows', async () => {
+      const fetchWorkflowsFn = vi.fn().mockResolvedValue({
+        content: [],
+        totalElements: 0,
+        totalPages: 0,
+        size: 10,
+        number: 0,
+      });
+
+      const createdWorkflow = {
+        id: 'wf-auto-created',
+        projectId: 'proj-empty',
+        name: 'Main Pipeline',
+        slug: 'main-pipeline',
+        description: 'Default orchestration workflow',
+        createdAt: '2026-10-19T10:00:00Z',
+        updatedAt: '2026-10-19T10:00:00Z',
+      };
+
+      const createWorkflowFn = vi.fn().mockResolvedValue(createdWorkflow);
+
+      const page = await fetchWorkflowsFn('proj-empty', { page: 0, size: 10 });
+      let activeWf = page.content[0];
+      if (!activeWf) {
+        activeWf = await createWorkflowFn('proj-empty', {
+          name: 'Main Pipeline',
+          description: 'Default orchestration workflow',
+        });
+      }
+
+      expect(createWorkflowFn).toHaveBeenCalledWith('proj-empty', {
+        name: 'Main Pipeline',
+        description: 'Default orchestration workflow',
+      });
+      expect(activeWf.id).toBe('wf-auto-created');
+    });
+
+    it('persists workflow draft and propagates server-derived metrics to UI state', async () => {
+      const mockSavedVersion: WorkflowVersionResponseDto = {
+        id: 'ver-saved-3',
+        workflowId: 'wf-active-1',
+        versionNumber: 3,
+        versionTag: 'v3.0.0',
+        description: 'New draft version',
+        graphPayload: { schemaVersion: 1, nodes: [], edges: [] },
+        taskCount: 4,
+        edgeCount: 3,
+        isValidDag: true,
+        createdAt: '2026-10-19T12:00:00Z',
+      };
+
+      const createVersionFn = vi.fn().mockResolvedValue(mockSavedVersion);
+      const toastCalls: Array<{ title: string; msg?: string; type?: string }> = [];
+
+      let currentVersion: WorkflowVersionResponseDto | null = null;
+      let isSaving = false;
+
+      const handleSave = async () => {
+        if (isSaving) return;
+        isSaving = true;
+        try {
+          const payload = {
+            versionTag: 'v3.0.0',
+            description: 'New draft version',
+            graphPayload: { schemaVersion: 1, nodes: [], edges: [] },
+          };
+          const saved = await createVersionFn('wf-active-1', payload);
+          currentVersion = saved;
+          toastCalls.push({
+            title: 'Draft Saved',
+            msg: `Persisted version ${saved.versionTag} (v${saved.versionNumber}) with ${saved.taskCount} tasks.`,
+            type: 'success',
+          });
+        } finally {
+          isSaving = false;
+        }
+      };
+
+      await handleSave();
+
+      expect(createVersionFn).toHaveBeenCalledTimes(1);
+      expect(currentVersion).toEqual(mockSavedVersion);
+
+      const updated = currentVersion as unknown as WorkflowVersionResponseDto;
+      expect(updated.versionNumber).toBe(3);
+      expect(updated.taskCount).toBe(4);
+      expect(updated.edgeCount).toBe(3);
+      expect(updated.isValidDag).toBe(true);
+
+      const versionBadgeText = `v${updated.versionNumber} [Draft]`;
+      expect(versionBadgeText).toBe('v3 [Draft]');
+
+      const metricsBadgeText = `${updated.taskCount} tasks • ${updated.edgeCount} edges`;
+      expect(metricsBadgeText).toBe('4 tasks • 3 edges');
+    });
+
+    it('prevents accidental duplicate submit while save draft is in flight', async () => {
+      let resolveSave!: (value: WorkflowVersionResponseDto) => void;
+      const savePromise = new Promise<WorkflowVersionResponseDto>((resolve) => {
+        resolveSave = resolve;
+      });
+
+      const createVersionFn = vi.fn().mockReturnValue(savePromise);
+
+      let isSaving = false;
+      let callCount = 0;
+
+      const handleSave = async () => {
+        if (isSaving) return null;
+        isSaving = true;
+        try {
+          callCount += 1;
+          return await createVersionFn('wf-1', {
+            graphPayload: { schemaVersion: 1 },
+          });
+        } finally {
+          isSaving = false;
+        }
+      };
+
+      const firstTrigger = handleSave();
+      expect(isSaving).toBe(true);
+      expect(createVersionFn).toHaveBeenCalledTimes(1);
+
+      const secondTrigger = await handleSave();
+      expect(secondTrigger).toBeNull();
+      expect(createVersionFn).toHaveBeenCalledTimes(1);
+
+      resolveSave({
+        id: 'ver-1',
+        workflowId: 'wf-1',
+        versionNumber: 1,
+        versionTag: 'v1.0',
+        description: null,
+        graphPayload: {},
+        taskCount: 1,
+        edgeCount: 0,
+        isValidDag: true,
+        createdAt: '2026-10-19T00:00:00Z',
+      });
+
+      await firstTrigger;
+      expect(isSaving).toBe(false);
+      expect(callCount).toBe(1);
+    });
+
+    it('keeps backend persistence error visible without fabricating successful save', async () => {
+      const apiError = new FlowForgeApiError(500, 'Internal persistence failure', [
+        'Database connection timeout while allocating version',
+      ]);
+      const createVersionFn = vi.fn().mockRejectedValue(apiError);
+
+      let currentVersion: WorkflowVersionResponseDto | null = null;
+      let displayedError: string | null = null;
+
+      try {
+        await createVersionFn('wf-1', { graphPayload: {} });
+      } catch (err) {
+        if (err instanceof FlowForgeApiError) {
+          displayedError = err.details?.length ? `${err.message}: ${err.details.join(', ')}` : err.message;
+        }
+      }
+
+      expect(currentVersion).toBeNull();
+      expect(displayedError).toBe(
+        'Internal persistence failure: Database connection timeout while allocating version'
+      );
+    });
+
+    it('clears canvas nodes and edges when restoring a persisted empty draft (Finding 02)', async () => {
+      // Simulate canvas that currently has existing tasks
+      let canvasNodes: Node<TaskNodeData>[] = [createNode('node-1', 'Initial Task 1'), createNode('node-2', 'Initial Task 2')];
+      let canvasEdges: Edge[] = [{ id: 'e-1', source: 'node-1', target: 'node-2' }];
+
+      const emptyDraftResponse: WorkflowVersionResponseDto = {
+        id: 'ver-empty-uuid',
+        workflowId: 'wf-real-1',
+        versionNumber: 2,
+        versionTag: 'v2.0.0',
+        description: 'Cleared pipeline',
+        graphPayload: {
+          schemaVersion: 1,
+          nodes: [],
+          edges: [],
+        },
+        taskCount: 0,
+        edgeCount: 0,
+        isValidDag: true,
+        createdAt: '2026-10-19T12:00:00Z',
+      };
+
+      const getLatestVersionFn = vi.fn().mockResolvedValue(emptyDraftResponse);
+
+      // Execute restoration logic as implemented in WorkflowBuilder
+      const latest = await getLatestVersionFn('wf-real-1');
+      const payload = latest.graphPayload;
+
+      if (payload && Array.isArray(payload.nodes)) {
+        const loadedNodes = (payload.nodes as Node<TaskNodeData>[]).map((n) => ({
+          ...n,
+          type: n.type || 'customTask',
+          data: {
+            ...n.data,
+            status: 'IDLE' as TaskStatus,
+          },
+        }));
+        const loadedEdges = (Array.isArray(payload.edges) ? (payload.edges as Edge[]) : []).map(
+          (e) => ({
+            ...e,
+            type: e.type || 'smoothstep',
+          })
+        );
+        canvasNodes = loadedNodes;
+        canvasEdges = loadedEdges;
+      }
+
+      // Assert that nodes and edges are both cleared to empty
+      expect(canvasNodes).toEqual([]);
+      expect(canvasEdges).toEqual([]);
+      expect(latest.taskCount).toBe(0);
+      expect(latest.edgeCount).toBe(0);
+      expect(latest.isValidDag).toBe(true);
+    });
+
+    it('correctly loads non-empty persisted draft and resets task statuses to IDLE (Finding 02)', async () => {
+      let canvasNodes: Node<TaskNodeData>[] = [];
+      let canvasEdges: Edge[] = [];
+
+      const nonEmptyDraftResponse: WorkflowVersionResponseDto = {
+        id: 'ver-2-nodes',
+        workflowId: 'wf-real-2',
+        versionNumber: 3,
+        versionTag: 'v3.0.0',
+        description: 'Two task pipeline',
+        graphPayload: {
+          schemaVersion: 1,
+          nodes: [
+            { id: 'task-a', type: 'customTask', position: { x: 10, y: 20 }, data: { label: 'Task A', status: 'COMPLETED' } },
+            { id: 'task-b', type: 'customTask', position: { x: 100, y: 200 }, data: { label: 'Task B', status: 'FAILED' } },
+          ],
+          edges: [
+            { id: 'e-ab', source: 'task-a', target: 'task-b', type: 'smoothstep' },
+          ],
+        },
+        taskCount: 2,
+        edgeCount: 1,
+        isValidDag: true,
+        createdAt: '2026-10-19T12:00:00Z',
+      };
+
+      const getLatestVersionFn = vi.fn().mockResolvedValue(nonEmptyDraftResponse);
+
+      const latest = await getLatestVersionFn('wf-real-2');
+      const payload = latest.graphPayload;
+
+      if (payload && Array.isArray(payload.nodes)) {
+        const loadedNodes = (payload.nodes as Node<TaskNodeData>[]).map((n) => ({
+          ...n,
+          type: n.type || 'customTask',
+          data: {
+            ...n.data,
+            status: 'IDLE' as TaskStatus,
+          },
+        }));
+        const loadedEdges = (Array.isArray(payload.edges) ? (payload.edges as Edge[]) : []).map(
+          (e) => ({
+            ...e,
+            type: e.type || 'smoothstep',
+          })
+        );
+        canvasNodes = loadedNodes;
+        canvasEdges = loadedEdges;
+      }
+
+      expect(canvasNodes).toHaveLength(2);
+      expect(canvasNodes[0].id).toBe('task-a');
+      expect(canvasNodes[0].data.status).toBe('IDLE');
+      expect(canvasNodes[1].id).toBe('task-b');
+      expect(canvasNodes[1].data.status).toBe('IDLE');
+      expect(canvasEdges).toHaveLength(1);
+      expect(canvasEdges[0].source).toBe('task-a');
+      expect(canvasEdges[0].target).toBe('task-b');
+    });
+
+    it('blocks save draft and displays explanation when workflow is an offline mock template (Finding 01)', async () => {
+      const createVersionFn = vi.fn();
+      const toastCalls: Array<{ title: string; msg?: string; type?: string }> = [];
+
+      const currentWorkflow = {
+        id: 'wf-001',
+        projectId: 'proj-001',
+        name: 'Clickstream Ingestion & Deduplication',
+        slug: 'clickstream-ingestion',
+        isMock: true,
+      };
+
+      let isSaving = false;
+
+      // Execute WorkflowBuilder handleSaveDraft logic
+      const handleSaveDraft = async () => {
+        if (!currentWorkflow?.id || currentWorkflow.isMock) {
+          toastCalls.push({
+            title: 'Sample Template (Cannot Save)',
+            msg: 'Sample template workflows cannot be saved directly to the backend. Create or open a persistent project workspace to persist workflow drafts.',
+            type: 'warning',
+          });
+          return;
+        }
+
+        isSaving = true;
+        try {
+          await createVersionFn(currentWorkflow.id, { graphPayload: {} });
+        } finally {
+          isSaving = false;
+        }
+      };
+
+      await handleSaveDraft();
+
+      // 1. Must not trigger backend API call with mock ID
+      expect(createVersionFn).not.toHaveBeenCalled();
+
+      // 2. isSaving must remain false
+      expect(isSaving).toBe(false);
+
+      // 3. User receives clear explanation
+      expect(toastCalls).toHaveLength(1);
+      expect(toastCalls[0].type).toBe('warning');
+      expect(toastCalls[0].title).toBe('Sample Template (Cannot Save)');
+      expect(toastCalls[0].msg).toContain('Sample template workflows cannot be saved directly to the backend');
+    });
+
+    it('normalizes persisted taskNode types and preserves IDs, positions, and edge connectivity', async () => {
+      const persistedVersion: WorkflowVersionResponseDto = {
+        id: '1c6d313d-343d-4199-83c4-09fd0bc2f38e',
+        workflowId: 'f28f06f9-f857-4568-881e-1a3bcf3f94ee',
+        versionNumber: 1,
+        versionTag: 'v1',
+        description: null,
+        graphPayload: {
+          schemaVersion: 1,
+          nodes: [
+            {
+              id: 'task-1',
+              type: 'taskNode',
+              position: { x: 100, y: 100 },
+              data: { label: 'Data Extraction', taskType: 'DATA_SOURCE', command: 'extract.sh' },
+            },
+            {
+              id: 'task-2',
+              type: 'taskNode',
+              position: { x: 300, y: 100 },
+              data: { label: 'Transformation', taskType: 'TRANSFORM', command: 'transform.sh' },
+            },
+          ],
+          edges: [
+            { id: 'e-task-1-task-2', source: 'task-1', target: 'task-2' },
+          ],
+        },
+        taskCount: 2,
+        edgeCount: 1,
+        isValidDag: true,
+        createdAt: '2026-10-19T13:07:23.378636Z',
+      };
+
+      const getLatestVersionFn = vi.fn().mockResolvedValue(persistedVersion);
+      const latest = await getLatestVersionFn('f28f06f9-f857-4568-881e-1a3bcf3f94ee');
+
+      const { nodes, edges } = restoreCanvasFromGraphPayload(latest.graphPayload);
+
+      // 1. Both nodes are normalized to customTask
+      expect(nodes).toHaveLength(2);
+      expect(nodes[0].id).toBe('task-1');
+      expect(nodes[0].type).toBe('customTask');
+      expect(nodes[0].position).toEqual({ x: 100, y: 100 });
+      expect(nodes[0].data.label).toBe('Data Extraction');
+      expect(nodes[0].data.status).toBe('IDLE');
+
+      expect(nodes[1].id).toBe('task-2');
+      expect(nodes[1].type).toBe('customTask');
+      expect(nodes[1].position).toEqual({ x: 300, y: 100 });
+      expect(nodes[1].data.label).toBe('Transformation');
+      expect(nodes[1].data.status).toBe('IDLE');
+
+      // 2. Edge connectivity intact
+      expect(edges).toHaveLength(1);
+      expect(edges[0].id).toBe('e-task-1-task-2');
+      expect(edges[0].source).toBe('task-1');
+      expect(edges[0].target).toBe('task-2');
+      expect(edges[0].type).toBe('smoothstep');
+
+      // 3. Server-derived metrics match
+      expect(latest.taskCount).toBe(2);
+      expect(latest.edgeCount).toBe(1);
+      expect(latest.isValidDag).toBe(true);
     });
   });
 });

@@ -13,7 +13,7 @@ import {
   type Edge,
   type Node,
 } from '@xyflow/react';
-import { INITIAL_DAG_NODES, INITIAL_DAG_EDGES } from '../mockData';
+import { INITIAL_DAG_NODES, INITIAL_DAG_EDGES, MOCK_WORKFLOWS, MOCK_PROJECTS } from '../mockData';
 import type {
   TaskNodeData,
   TaskType,
@@ -21,7 +21,16 @@ import type {
   DagValidationResult,
   ExecuteWorkflowRequest,
   ExecuteWorkflowResponse,
+  WorkflowResponseDto,
+  WorkflowVersionResponseDto,
 } from '../types';
+import {
+  fetchWorkflows as defaultFetchWorkflows,
+  createWorkflow as defaultCreateWorkflow,
+  getLatestWorkflowVersion as defaultGetLatestWorkflowVersion,
+  createWorkflowVersion as defaultCreateWorkflowVersion,
+} from '../api/flowForgeApi';
+import { saveWorkflowDraft, restoreCanvasFromGraphPayload } from '../utils/workflowPersistenceAdapters';
 import { CustomTaskNode } from '../components/workflow/CustomTaskNode';
 import { TaskPalette } from '../components/workflow/TaskPalette';
 import { TaskInspector } from '../components/workflow/TaskInspector';
@@ -47,22 +56,46 @@ import {
   Loader2,
 } from 'lucide-react';
 
-interface WorkflowBuilderProps {
+export interface WorkflowBuilderProps {
+  projectId?: string;
+  workflowId?: string;
   onBackToProjects: () => void;
   onShowToast: (title: string, message?: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
   theme?: 'light' | 'dark';
   executeApiFn?: (request: ExecuteWorkflowRequest) => Promise<ExecuteWorkflowResponse>;
+  fetchWorkflowsFn?: typeof defaultFetchWorkflows;
+  createWorkflowFn?: typeof defaultCreateWorkflow;
+  getLatestVersionFn?: typeof defaultGetLatestWorkflowVersion;
+  createVersionFn?: typeof defaultCreateWorkflowVersion;
 }
 
 const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
+  projectId,
+  workflowId,
   onBackToProjects,
   onShowToast,
   theme = 'dark',
   executeApiFn,
+  fetchWorkflowsFn = defaultFetchWorkflows,
+  createWorkflowFn = defaultCreateWorkflow,
+  getLatestVersionFn = defaultGetLatestWorkflowVersion,
+  createVersionFn = defaultCreateWorkflowVersion,
 }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TaskNodeData>>(INITIAL_DAG_NODES);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(INITIAL_DAG_EDGES);
   const { fitView } = useReactFlow();
+
+  const [currentWorkflow, setCurrentWorkflow] = useState<{
+    id: string;
+    projectId?: string;
+    name: string;
+    slug?: string;
+    isMock?: boolean;
+  } | null>(null);
+  const [currentVersion, setCurrentVersion] = useState<WorkflowVersionResponseDto | null>(null);
+  const [isLoadingWorkflow, setIsLoadingWorkflow] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const isSavingRef = useRef<boolean>(false);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [validationResult, setValidationResult] = useState<DagValidationResult | null>(null);
@@ -76,7 +109,111 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   // Monotonically increasing run ID to ignore stale responses if the graph is edited while in flight
   const activeRunIdRef = useRef<number>(0);
 
-  const nodeTypes = useMemo(() => ({ customTask: CustomTaskNode }), []);
+  const nodeTypes = useMemo(
+    () => ({
+      customTask: CustomTaskNode,
+      taskNode: CustomTaskNode,
+    }),
+    []
+  );
+
+  // Workflow initialization & persistence fetch
+  useEffect(() => {
+    let isCancelled = false;
+
+    const loadWorkflow = async () => {
+      if (!projectId && !workflowId) {
+        setCurrentWorkflow({
+          id: MOCK_WORKFLOWS[0].id,
+          projectId: MOCK_WORKFLOWS[0].projectId,
+          name: MOCK_WORKFLOWS[0].name,
+          slug: MOCK_WORKFLOWS[0].id,
+          isMock: true,
+        });
+        return;
+      }
+
+      setIsLoadingWorkflow(true);
+
+      try {
+        let activeWf: { id: string; projectId?: string; name: string; slug?: string; isMock?: boolean } | null = null;
+
+        if (workflowId) {
+          const isMockWorkflow = MOCK_WORKFLOWS.some((w) => w.id === workflowId);
+          activeWf = { id: workflowId, name: 'Active Workflow', isMock: isMockWorkflow };
+        } else if (projectId) {
+          const isMockProject = MOCK_PROJECTS.some((p) => p.id === projectId);
+          if (isMockProject) {
+            const mockWf = MOCK_WORKFLOWS.find((w) => w.projectId === projectId) || MOCK_WORKFLOWS[0];
+            activeWf = {
+              id: mockWf.id,
+              projectId,
+              name: mockWf.name,
+              slug: mockWf.id,
+              isMock: true,
+            };
+          } else {
+            try {
+              const page = await fetchWorkflowsFn(projectId, { page: 0, size: 10 });
+              if (page.content && page.content.length > 0) {
+                activeWf = { ...page.content[0], isMock: false };
+              } else {
+                const created: WorkflowResponseDto = await createWorkflowFn(projectId, {
+                  name: 'Main Pipeline',
+                  description: 'Default orchestration workflow',
+                });
+                activeWf = { ...created, isMock: false };
+              }
+            } catch {
+              const mockWf = MOCK_WORKFLOWS.find((w) => w.projectId === projectId) || MOCK_WORKFLOWS[0];
+              activeWf = {
+                id: mockWf.id,
+                projectId,
+                name: mockWf.name,
+                slug: mockWf.id,
+                isMock: true,
+              };
+            }
+          }
+        }
+
+        if (isCancelled || !activeWf) return;
+        setCurrentWorkflow(activeWf);
+
+        if (!activeWf.isMock) {
+          try {
+            const latest = await getLatestVersionFn(activeWf.id);
+            if (!isCancelled && latest) {
+              setCurrentVersion(latest);
+              const payload = latest.graphPayload;
+              if (payload && Array.isArray(payload.nodes)) {
+                const { nodes: loadedNodes, edges: loadedEdges } = restoreCanvasFromGraphPayload(payload);
+                setNodes(loadedNodes);
+                setEdges(loadedEdges);
+                if (loadedNodes.length > 0) {
+                  setTimeout(() => {
+                    fitView({ padding: 0.25, duration: 200 });
+                  }, 50);
+                }
+              }
+            }
+          } catch {
+            // No versions persisted yet: initial canvas remains active
+          }
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingWorkflow(false);
+        }
+      }
+    };
+
+    void loadWorkflow();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [projectId, workflowId, fetchWorkflowsFn, createWorkflowFn, getLatestVersionFn, setNodes, setEdges, fitView]);
 
   // Helper to reset execution results and revert non-IDLE canvas node statuses when the graph is modified
   const resetStaleExecution = useCallback(() => {
@@ -275,6 +412,47 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     [setEdges, setNodes]
   );
 
+  const handleSaveDraft = async () => {
+    if (isSavingRef.current || isSavingDraft) {
+      return;
+    }
+
+    if (!currentWorkflow?.id || currentWorkflow.isMock) {
+      onShowToast(
+        'Sample Template (Cannot Save)',
+        'Sample template workflows cannot be saved directly to the backend. Create or open a persistent project workspace to persist workflow drafts.',
+        'warning'
+      );
+      return;
+    }
+
+    isSavingRef.current = true;
+    setIsSavingDraft(true);
+
+    try {
+      const saved = await saveWorkflowDraft({
+        workflowId: currentWorkflow.id,
+        isMock: currentWorkflow.isMock,
+        nodes,
+        edges,
+        versionTag: currentVersion ? `v${currentVersion.versionNumber + 1}.0` : undefined,
+        isSaving: false,
+        setIsSaving: () => {},
+        onShowToast,
+        createVersionApiFn: createVersionFn,
+      });
+
+      if (saved) {
+        setCurrentVersion(saved);
+      }
+    } catch {
+      // Error toast already displayed by saveWorkflowDraft; no fake success
+    } finally {
+      isSavingRef.current = false;
+      setIsSavingDraft(false);
+    }
+  };
+
   const handleValidateDag = () => {
     void executeWorkflowValidation({
       nodes,
@@ -307,14 +485,35 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
 
           <div className="flex items-center gap-2">
             <span className="text-xs font-semibold text-[var(--text-primary)]">
-              Clickstream Ingestion & Deduplication
+              {currentWorkflow ? currentWorkflow.name : 'Clickstream Ingestion & Deduplication'}
             </span>
-            <Badge variant="cyan" size="sm">
-              v1.4.0 [Draft]
+            <Badge
+              variant={currentVersion?.isValidDag === false ? 'warning' : 'cyan'}
+              size="sm"
+              data-testid="workflow-version-badge"
+            >
+              {currentVersion ? `v${currentVersion.versionNumber} [Draft]` : 'v1.4.0 [Draft]'}
             </Badge>
-            <Badge variant="outline" size="sm">
-              {nodes.length} nodes • {edges.length} edges
+            <Badge variant="outline" size="sm" data-testid="workflow-metrics-badge">
+              {currentVersion
+                ? `${currentVersion.taskCount} tasks • ${currentVersion.edgeCount} edges`
+                : `${nodes.length} nodes • ${edges.length} edges`}
             </Badge>
+            {currentVersion && (
+              <Badge
+                variant={currentVersion.isValidDag ? 'success' : 'warning'}
+                size="sm"
+                data-testid="dag-validity-badge"
+              >
+                {currentVersion.isValidDag ? 'DAG Valid' : 'Cyclic Draft'}
+              </Badge>
+            )}
+            {isLoadingWorkflow && (
+              <Badge variant="outline" size="sm">
+                <Loader2 size={10} className="animate-spin mr-1 text-[var(--accent-blue)]" />
+                Syncing...
+              </Badge>
+            )}
           </div>
         </div>
 
@@ -352,12 +551,12 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
           <Button
             variant="secondary"
             size="sm"
-            icon={<Save size={12} />}
-            onClick={() =>
-              onShowToast('Draft Saved', 'Pipeline state cached locally.', 'success')
-            }
+            icon={isSavingDraft ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+            onClick={() => void handleSaveDraft()}
+            disabled={isSavingDraft || isLoadingWorkflow}
+            data-testid="save-draft-button"
           >
-            Save Draft
+            {isSavingDraft ? 'Saving Draft...' : 'Save Draft'}
           </Button>
 
           <Button
@@ -427,7 +626,7 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
       <div className="flex-1 flex min-h-0 relative">
         <TaskPalette onAddTask={handleAddTask} />
 
-        <div className="flex-1 w-full h-full canvas-dot-grid relative min-h-[500px]">
+        <div className="flex-1 min-w-0 h-full canvas-dot-grid relative">
           <ReactFlow
             nodes={nodes}
             edges={edges}

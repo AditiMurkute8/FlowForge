@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { MOCK_PROJECTS, MOCK_STATS } from '../mockData';
-import type { Project, PipelineHealth } from '../types';
+import type { Project, PipelineHealth, ProjectResponseDto } from '../types';
+import {
+  fetchProjects as defaultFetchProjects,
+  createProject as defaultCreateProject,
+  FlowForgeApiError,
+} from '../api/flowForgeApi';
 import { StatCard } from '../components/ui/StatCard';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
@@ -16,16 +21,28 @@ import {
   Search,
   ExternalLink,
   Clock,
+  Loader2,
+  AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 
-interface ProjectsDashboardProps {
+export interface ProjectsDashboardProps {
   onOpenWorkflow: (projectId: string) => void;
+  onShowToast?: (title: string, message?: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
+  fetchProjectsFn?: typeof defaultFetchProjects;
+  createProjectFn?: typeof defaultCreateProject;
 }
 
 export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
   onOpenWorkflow,
+  onShowToast,
+  fetchProjectsFn = defaultFetchProjects,
+  createProjectFn = defaultCreateProject,
 }) => {
-  const [projects, setProjects] = useState<Project[]>(MOCK_PROJECTS);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string>('All');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -38,6 +55,45 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
 
   const filterTabs = ['All', 'Production', 'Staging', 'Data Pipeline', 'Security'];
 
+  const loadProjects = useCallback(async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const page = await fetchProjectsFn({ page: 0, size: 50 });
+      const loaded: Project[] = (page.content || []).map((dto: ProjectResponseDto) => ({
+        id: dto.id,
+        name: dto.name,
+        slug: dto.slug,
+        description: dto.description || 'Workflow pipeline workspace.',
+        workflowCount: 1,
+        lastExecutionAt: 'Never',
+        lastExecutionStatus: 'QUEUED',
+        tags: ['Production'],
+        owner: 'current.user@flowforge.internal',
+        isMock: false,
+        version: 'v1.0.0',
+        updatedAt: dto.updatedAt,
+      }));
+      setProjects(loaded);
+    } catch (err) {
+      let msg = 'Failed to load projects from server.';
+      if (err instanceof FlowForgeApiError) {
+        msg = err.message;
+      } else if (err instanceof Error) {
+        msg = err.message;
+      }
+      setLoadError(msg);
+      // Graceful fallback to mock data when backend is not running or unreachable
+      setProjects(MOCK_PROJECTS);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [fetchProjectsFn]);
+
+  useEffect(() => {
+    void loadProjects();
+  }, [loadProjects]);
+
   const filteredProjects = projects.filter((proj) => {
     const matchesSearch =
       proj.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -48,33 +104,64 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
     return matchesSearch && matchesTag;
   });
 
-  const handleCreateProject = (e: React.FormEvent) => {
+  const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreating) return;
+
     if (!newProjectName.trim()) {
       setFormError('Project name is required');
       return;
     }
 
-    const newProj: Project = {
-      id: `proj-${Date.now()}`,
-      name: newProjectName.trim(),
-      slug: newProjectName.trim().toLowerCase().replace(/\s+/g, '-'),
-      description: newProjectDesc.trim() || 'Workflow pipeline workspace.',
-      workflowCount: 1,
-      lastExecutionAt: 'Just now',
-      lastExecutionStatus: 'HEALTHY',
-      tags: [newProjectTag],
-      owner: 'current.user@flowforge.internal',
-      isMock: true,
-      version: 'v0.1.0',
-      updatedAt: new Date().toISOString(),
-    };
-
-    setProjects([newProj, ...projects]);
-    setIsCreateModalOpen(false);
-    setNewProjectName('');
-    setNewProjectDesc('');
+    setIsCreating(true);
     setFormError(null);
+
+    try {
+      const createdDto = await createProjectFn({
+        name: newProjectName.trim(),
+        description: newProjectDesc.trim() || undefined,
+      });
+
+      const newProj: Project = {
+        id: createdDto.id,
+        name: createdDto.name,
+        slug: createdDto.slug,
+        description: createdDto.description || 'Workflow pipeline workspace.',
+        workflowCount: 0,
+        lastExecutionAt: 'Never',
+        lastExecutionStatus: 'QUEUED',
+        tags: [newProjectTag],
+        owner: 'current.user@flowforge.internal',
+        isMock: false,
+        version: 'v0.1.0',
+        updatedAt: createdDto.updatedAt,
+      };
+
+      setProjects((prev) => [newProj, ...prev]);
+      setIsCreateModalOpen(false);
+      setNewProjectName('');
+      setNewProjectDesc('');
+      setFormError(null);
+      if (onShowToast) {
+        onShowToast(
+          'Project Created',
+          `Created project "${createdDto.name}" (${createdDto.slug}).`,
+          'success'
+        );
+      }
+    } catch (err) {
+      let msg = 'Failed to create project';
+      if (err instanceof FlowForgeApiError) {
+        msg = err.details && err.details.length > 0
+          ? `${err.message}: ${err.details.join(', ')}`
+          : err.message;
+      } else if (err instanceof Error) {
+        msg = err.message;
+      }
+      setFormError(msg);
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   const renderHealthIndicator = (health: PipelineHealth) => {
@@ -123,15 +210,53 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
           </p>
         </div>
 
-        <Button
-          variant="primary"
-          size="sm"
-          icon={<Plus size={13} />}
-          onClick={() => setIsCreateModalOpen(true)}
-        >
-          New Project
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<RefreshCw size={12} className={isLoading ? 'animate-spin' : ''} />}
+            onClick={() => void loadProjects()}
+            disabled={isLoading}
+          >
+            Refresh
+          </Button>
+
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Plus size={13} />}
+            onClick={() => {
+              setFormError(null);
+              setIsCreateModalOpen(true);
+            }}
+          >
+            New Project
+          </Button>
+        </div>
       </div>
+
+      {/* Backend Connectivity / Load Error Banner */}
+      {loadError && (
+        <div
+          role="alert"
+          className="rounded-[6px] border border-[var(--status-yellow-border)] bg-[var(--status-yellow-bg)] p-3 text-xs text-[var(--status-yellow-text)] flex items-center justify-between gap-3 shadow-xs"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={15} className="shrink-0 text-[var(--status-yellow-text)]" />
+            <span>
+              Backend notice: {loadError} Displaying fallback projects for offline inspection.
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void loadProjects()}
+            disabled={isLoading}
+          >
+            Retry Connection
+          </Button>
+        </div>
+      )}
 
       {/* Operational Summary Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -190,16 +315,32 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
         </div>
       </div>
 
-      {/* High-Density Project Inventory List */}
-      {filteredProjects.length === 0 ? (
+      {/* Loading State */}
+      {isLoading && projects.length === 0 ? (
+        <div className="rounded-[6px] border border-[var(--border-default)] bg-[var(--bg-surface)] p-12 flex flex-col items-center justify-center gap-2">
+          <Loader2 size={24} className="animate-spin text-[var(--accent-blue)]" />
+          <p className="text-xs font-mono text-[var(--text-secondary)]">
+            Loading project inventory from server...
+          </p>
+        </div>
+      ) : filteredProjects.length === 0 ? (
         <EmptyState
           icon={<FolderKanban size={20} />}
-          title="No Projects Match Query"
-          description={`No projects found matching "${searchQuery}".`}
-          actionLabel="Clear Filters"
+          title={projects.length === 0 ? 'No Projects Found' : 'No Projects Match Query'}
+          description={
+            projects.length === 0
+              ? 'No projects exist on the server yet. Create your first project workspace to begin.'
+              : `No projects found matching "${searchQuery}".`
+          }
+          actionLabel={projects.length === 0 ? 'Create Project' : 'Clear Filters'}
           onAction={() => {
-            setSearchQuery('');
-            setSelectedTag('All');
+            if (projects.length === 0) {
+              setFormError(null);
+              setIsCreateModalOpen(true);
+            } else {
+              setSearchQuery('');
+              setSelectedTag('All');
+            }
           }}
         />
       ) : (
@@ -288,7 +429,11 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
       {/* Create Project Modal */}
       <Modal
         isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
+        onClose={() => {
+          if (!isCreating) {
+            setIsCreateModalOpen(false);
+          }
+        }}
         title="Initialize New Project"
         description="Create an orchestration workspace for DAG workflows."
         footer={
@@ -297,22 +442,42 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
               variant="outline"
               size="sm"
               onClick={() => setIsCreateModalOpen(false)}
+              disabled={isCreating}
             >
               Cancel
             </Button>
-            <Button variant="primary" size="sm" onClick={handleCreateProject}>
-              Create Project
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleCreateProject}
+              disabled={isCreating}
+              isLoading={isCreating}
+            >
+              {isCreating ? 'Creating...' : 'Create Project'}
             </Button>
           </>
         }
       >
         <form onSubmit={handleCreateProject} className="space-y-3">
+          {formError && (
+            <div
+              role="alert"
+              className="rounded-[5px] border border-[var(--status-red-border)] bg-[var(--status-red-bg)] p-2.5 text-xs text-[var(--status-red-text)] flex items-center gap-2"
+            >
+              <AlertTriangle size={14} className="shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
+
           <Input
             label="Project Name"
             placeholder="e.g. Fraud Detection Engine"
             value={newProjectName}
-            onChange={(e) => setNewProjectName(e.target.value)}
-            error={formError || undefined}
+            onChange={(e) => {
+              setNewProjectName(e.target.value);
+              if (formError) setFormError(null);
+            }}
+            disabled={isCreating}
             autoFocus
           />
 
@@ -325,7 +490,8 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
               placeholder="Describe the workflows coordinated by this project..."
               value={newProjectDesc}
               onChange={(e) => setNewProjectDesc(e.target.value)}
-              className="w-full rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-blue)] focus:border-[var(--accent-blue)] transition-colors"
+              disabled={isCreating}
+              className="w-full rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-blue)] focus:border-[var(--accent-blue)] transition-colors disabled:opacity-50"
             />
           </div>
 
@@ -336,7 +502,8 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
             <select
               value={newProjectTag}
               onChange={(e) => setNewProjectTag(e.target.value)}
-              className="w-full rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-blue)] focus:border-[var(--accent-blue)] transition-colors"
+              disabled={isCreating}
+              className="w-full rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-blue)] focus:border-[var(--accent-blue)] transition-colors disabled:opacity-50"
             >
               <option value="Production">Production</option>
               <option value="Staging">Staging</option>

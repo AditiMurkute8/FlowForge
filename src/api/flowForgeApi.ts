@@ -4,6 +4,14 @@ import type {
   ExecuteWorkflowRequest,
   ExecuteWorkflowResponse,
   ApiErrorResponse,
+  PageResponse,
+  CreateProjectRequest,
+  ProjectResponseDto,
+  CreateWorkflowRequest,
+  WorkflowResponseDto,
+  CreateWorkflowVersionRequest,
+  WorkflowVersionResponseDto,
+  WorkflowVersionSummaryResponseDto,
 } from '../types';
 
 /**
@@ -180,4 +188,227 @@ export async function executeWorkflow(
   }
 
   return handleResponse<ExecuteWorkflowResponse>(response);
+}
+
+// ============================================================================
+// PERSISTENCE REST API CLIENT METHODS (Phase 1.2 Step 2)
+// ============================================================================
+
+/**
+ * Loads paginated projects from the FlowForge backend.
+ */
+export async function fetchProjects(
+  options?: ApiClientOptions & { page?: number; size?: number }
+): Promise<PageResponse<ProjectResponseDto>> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const page = options?.page ?? 0;
+  const size = options?.size ?? 100;
+  const url = `${apiRoot}/projects?page=${page}&size=${size}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<PageResponse<ProjectResponseDto>>(response);
+}
+
+/**
+ * Creates a new project in the FlowForge backend.
+ */
+export async function createProject(
+  request: CreateProjectRequest,
+  options?: ApiClientOptions
+): Promise<ProjectResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/projects`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<ProjectResponseDto>(response);
+}
+
+/**
+ * Fetches a single project by ID.
+ */
+export async function getProject(
+  projectId: string,
+  options?: ApiClientOptions
+): Promise<ProjectResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/projects/${encodeURIComponent(projectId)}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<ProjectResponseDto>(response);
+}
+
+/**
+ * Loads paginated workflows for a specific parent project.
+ */
+export async function fetchWorkflows(
+  projectId: string,
+  options?: ApiClientOptions & { page?: number; size?: number }
+): Promise<PageResponse<WorkflowResponseDto>> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const page = options?.page ?? 0;
+  const size = options?.size ?? 100;
+  const url = `${apiRoot}/projects/${encodeURIComponent(projectId)}/workflows?page=${page}&size=${size}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<PageResponse<WorkflowResponseDto>>(response);
+}
+
+/**
+ * Creates a new workflow under a parent project.
+ */
+export async function createWorkflow(
+  projectId: string,
+  request: CreateWorkflowRequest,
+  options?: ApiClientOptions
+): Promise<WorkflowResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/projects/${encodeURIComponent(projectId)}/workflows`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<WorkflowResponseDto>(response);
+}
+
+/**
+ * Loads paginated version summaries for a workflow (omitting graphPayload).
+ */
+export async function fetchWorkflowVersions(
+  workflowId: string,
+  options?: ApiClientOptions & { page?: number; size?: number }
+): Promise<PageResponse<WorkflowVersionSummaryResponseDto>> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const page = options?.page ?? 0;
+  const size = options?.size ?? 50;
+  const url = `${apiRoot}/workflows/${encodeURIComponent(workflowId)}/versions?page=${page}&size=${size}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<PageResponse<WorkflowVersionSummaryResponseDto>>(response);
+}
+
+/**
+ * Fetches the latest immutable workflow version including full graphPayload.
+ */
+export async function getLatestWorkflowVersion(
+  workflowId: string,
+  options?: ApiClientOptions
+): Promise<WorkflowVersionResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/workflows/${encodeURIComponent(workflowId)}/versions/latest`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<WorkflowVersionResponseDto>(response);
+}
+
+/**
+ * Creates a new immutable workflow version snapshot (draft or valid DAG).
+ */
+export async function createWorkflowVersion(
+  workflowId: string,
+  request: CreateWorkflowVersionRequest,
+  options?: ApiClientOptions
+): Promise<WorkflowVersionResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/workflows/${encodeURIComponent(workflowId)}/versions`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<WorkflowVersionResponseDto>(response);
 }

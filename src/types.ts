@@ -154,3 +154,79 @@ export interface ApiErrorResponse {
   timestamp: string;
   details: string[];
 }
+
+// --- Persistence REST API DTOs (Phase 1.2 Step 2) ---
+
+export interface PageResponse<T> {
+  content: T[];
+  totalElements: number;
+  totalPages: number;
+  size: number;
+  number: number;
+}
+
+export interface CreateProjectRequest {
+  name: string;
+  slug?: string;
+  description?: string;
+}
+
+export interface ProjectResponseDto {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorkflowRequest {
+  name: string;
+  slug?: string;
+  description?: string;
+}
+
+export interface WorkflowResponseDto {
+  id: string;
+  projectId: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorkflowVersionRequest {
+  versionTag?: string;
+  description?: string;
+  graphPayload: Record<string, unknown>;
+}
+
+export interface WorkflowVersionResponseDto {
+  id: string;
+  workflowId: string;
+  versionNumber: number;
+  versionTag: string;
+  description: string | null;
+  graphPayload: {
+    nodes?: unknown[];
+    edges?: unknown[];
+    [key: string]: unknown;
+  };
+  taskCount: number;
+  edgeCount: number;
+  isValidDag: boolean;
+  createdAt: string;
+}
+
+export interface WorkflowVersionSummaryResponseDto {
+  id: string;
+  workflowId: string;
+  versionNumber: number;
+  versionTag: string;
+  description: string | null;
+  taskCount: number;
+  edgeCount: number;
+  isValidDag: boolean;
+  createdAt: string;
+}
