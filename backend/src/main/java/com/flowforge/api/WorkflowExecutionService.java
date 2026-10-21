@@ -194,13 +194,27 @@ public class WorkflowExecutionService {
     }
 
     void reclaimPermitWhenTerminated(WorkflowScheduler scheduler, AtomicBoolean permitHandled, Runnable onPermitReleased) {
-        if (scheduler == null || isSchedulerTerminated(scheduler)) {
+        boolean terminated = false;
+        try {
+            terminated = (scheduler == null || isSchedulerTerminated(scheduler));
+        } catch (Throwable t) {
+            log.warn("Exception during scheduler termination check in reclaimPermitWhenTerminated; quarantining permit", t);
+            terminated = false;
+        }
+
+        if (terminated) {
             releasePermitSafely(permitHandled, onPermitReleased);
             return;
         }
 
         if (isShutdown()) {
-            if (isSchedulerTerminated(scheduler)) {
+            boolean termOnShutdown = false;
+            try {
+                termOnShutdown = isSchedulerTerminated(scheduler);
+            } catch (Throwable ignored) {
+                termOnShutdown = false;
+            }
+            if (termOnShutdown) {
                 releasePermitSafely(permitHandled, onPermitReleased);
             } else {
                 log.warn("Application is shutting down. Worker is still executing; permit remains safely quarantined until process termination.");
@@ -314,14 +328,15 @@ public class WorkflowExecutionService {
                     return;
                 }
                 WorkflowScheduler scheduler = null;
+                WorkflowExecutionResult result = null;
+                Throwable executionError = null;
                 try {
                     scheduler = new WorkflowScheduler(concurrency);
                     schedulerRef.set(scheduler);
-                    WorkflowExecutionResult result = scheduler.execute(graph, registry, listener);
-                    executionFuture.complete(result);
+                    result = scheduler.execute(graph, registry, listener);
                 } catch (Throwable t) {
                     log.error("Workflow execution failed", t);
-                    executionFuture.completeExceptionally(t);
+                    executionError = t;
                 } finally {
                     try {
                         closeScheduler(scheduler);
@@ -336,12 +351,22 @@ public class WorkflowExecutionService {
                             canRelease = false;
                         }
 
-                        if (canRelease) {
-                            releasePermitSafely(permitHandled, onPermitReleased);
+                        try {
+                            if (canRelease) {
+                                releasePermitSafely(permitHandled, onPermitReleased);
+                            } else {
+                                // Preserves capacity bound while worker is still running.
+                                // Asynchronously reclaim permit once the scheduler actually terminates.
+                                reclaimPermitWhenTerminated(scheduler, permitHandled, onPermitReleased);
+                            }
+                        } catch (Throwable releaseError) {
+                            log.error("Exception during permit release/reclaim", releaseError);
+                        }
+
+                        if (executionError != null) {
+                            executionFuture.completeExceptionally(executionError);
                         } else {
-                            // Preserves capacity bound while worker is still running.
-                            // Asynchronously reclaim permit once the scheduler actually terminates.
-                            reclaimPermitWhenTerminated(scheduler, permitHandled, onPermitReleased);
+                            executionFuture.complete(result);
                         }
                     }
                 }

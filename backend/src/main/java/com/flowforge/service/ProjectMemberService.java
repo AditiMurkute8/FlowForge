@@ -127,6 +127,10 @@ public class ProjectMemberService {
     }
 
     private long countProjectAdmins(UUID projectId) {
+        long count = projectMemberRepository.countByProjectIdAndRole(projectId, ProjectRole.ADMIN);
+        if (count > 0) {
+            return count;
+        }
         return projectMemberRepository.findByProjectId(projectId).stream()
             .filter(m -> m.getRole() == ProjectRole.ADMIN)
             .count();

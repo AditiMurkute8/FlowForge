@@ -1,6 +1,7 @@
 package com.flowforge.persistence.repository;
 
 import com.flowforge.domain.ProjectMember;
+import com.flowforge.domain.ProjectRole;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
@@ -21,6 +22,8 @@ public interface ProjectMemberRepository extends JpaRepository<ProjectMember, UU
     List<ProjectMember> findByUserId(UUID userId);
 
     boolean existsByProjectIdAndUserId(UUID projectId, UUID userId);
+
+    long countByProjectIdAndRole(UUID projectId, ProjectRole role);
 
     void deleteByProjectIdAndUserId(UUID projectId, UUID userId);
 }
