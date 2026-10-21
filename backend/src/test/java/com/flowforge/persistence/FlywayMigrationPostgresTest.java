@@ -469,21 +469,23 @@ class FlywayMigrationPostgresTest {
 
         try (Connection conn = getConnection()) {
             try (PreparedStatement stmt = conn.prepareStatement(
-                    "INSERT INTO users (id, email, password_hash, is_active) VALUES (?, ?, ?, ?)")) {
+                    "INSERT INTO users (id, email, password_hash, full_name, is_active) VALUES (?, ?, ?, ?, ?)")) {
                 stmt.setObject(1, user1Id);
                 stmt.setString(2, "alice@flowforge.io");
                 stmt.setString(3, "$2a$12$somevalidhashstringforexample12345678901234567890123456789012");
-                stmt.setBoolean(4, true);
+                stmt.setString(4, "Alice Smith");
+                stmt.setBoolean(5, true);
                 stmt.executeUpdate();
             }
 
             // Attempting to insert duplicate email (case-insensitive duplicate check via lower(email) or exact unique)
             try (PreparedStatement stmt = conn.prepareStatement(
-                    "INSERT INTO users (id, email, password_hash, is_active) VALUES (?, ?, ?, ?)")) {
+                    "INSERT INTO users (id, email, password_hash, full_name, is_active) VALUES (?, ?, ?, ?, ?)")) {
                 stmt.setObject(1, user2Id);
                 stmt.setString(2, "alice@flowforge.io");
                 stmt.setString(3, "$2a$12$anotherhashstringforexample12345678901234567890123456789012");
-                stmt.setBoolean(4, true);
+                stmt.setString(4, "Alice Duplicate");
+                stmt.setBoolean(5, true);
                 assertThatThrownBy(stmt::executeUpdate)
                         .isInstanceOf(SQLException.class);
             }
@@ -509,10 +511,11 @@ class FlywayMigrationPostgresTest {
 
             // Insert user
             try (PreparedStatement stmt = conn.prepareStatement(
-                    "INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)")) {
+                    "INSERT INTO users (id, email, password_hash, full_name) VALUES (?, ?, ?, ?)")) {
                 stmt.setObject(1, userId);
                 stmt.setString(2, "rbac-" + userId.toString().substring(0, 8) + "@flowforge.io");
                 stmt.setString(3, "$2a$12$somevalidhashstringforexample12345678901234567890123456789012");
+                stmt.setString(4, "RBAC User");
                 stmt.executeUpdate();
             }
 

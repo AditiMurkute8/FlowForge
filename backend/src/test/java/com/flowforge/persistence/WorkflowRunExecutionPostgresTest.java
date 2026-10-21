@@ -16,7 +16,9 @@ import com.flowforge.service.WorkflowRunService;
 import com.flowforge.service.exception.ResourceNotFoundException;
 import com.flowforge.service.exception.WorkflowExecutionTimeoutException;
 import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +28,8 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
@@ -35,6 +39,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -100,6 +105,12 @@ class WorkflowRunExecutionPostgresTest {
     private TaskRunRepository taskRunRepository;
 
     @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private ProjectMemberRepository projectMemberRepository;
+
+    @Autowired
     private WorkflowRunService workflowRunService;
 
     @Autowired
@@ -108,12 +119,35 @@ class WorkflowRunExecutionPostgresTest {
     @Autowired
     private SchedulerProperties properties;
 
+    private User testUser;
+
+    @BeforeEach
+    void setUpSecurity() {
+        testUser = userRepository.save(new User(
+                "wf_runner_" + UUID.randomUUID() + "@flowforge.internal",
+                "pw_hash",
+                "WF Runner"
+        ));
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(testUser, null, Collections.emptyList())
+        );
+    }
+
+    @AfterEach
+    void tearDownSecurity() {
+        SecurityContextHolder.clearContext();
+    }
+
     private WorkflowVersion createTestVersion(String prefix, ObjectNode payload) {
         Project project = projectRepository.save(new Project(
                 "Execution Project " + prefix,
                 "proj-" + prefix + "-" + UUID.randomUUID(),
                 "Integration test project"
         ));
+
+        if (testUser != null) {
+            projectMemberRepository.save(new ProjectMember(project, testUser, ProjectRole.ADMIN));
+        }
 
         Workflow workflow = workflowRepository.save(new Workflow(
                 project,

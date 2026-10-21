@@ -100,7 +100,7 @@ class ProjectMemberConcurrencyPostgresTest {
         projectRepository.deleteAll();
         userRepository.deleteAll();
 
-        testProject = projectRepository.save(new Project(UUID.randomUUID(), "Postgres Concurrency Project", "pg-concurrency-proj", "Test project"));
+        testProject = projectRepository.save(new Project("Postgres Concurrency Project", "pg-concurrency-proj", "Test project"));
 
         admin1 = userRepository.save(new User("pg_admin1@flowforge.internal", "hash1", "Admin One"));
         admin2 = userRepository.save(new User("pg_admin2@flowforge.internal", "hash2", "Admin Two"));

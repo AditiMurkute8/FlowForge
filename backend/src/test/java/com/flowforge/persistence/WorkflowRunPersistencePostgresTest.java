@@ -72,7 +72,7 @@ class WorkflowRunPersistencePostgresTest {
                 .load();
         int applied = flyway.migrate().migrationsExecuted;
         assertThat(applied).isGreaterThanOrEqualTo(3);
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("3");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("4");
     }
 
     @Autowired

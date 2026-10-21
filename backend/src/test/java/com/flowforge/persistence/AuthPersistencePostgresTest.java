@@ -102,7 +102,7 @@ class AuthPersistencePostgresTest {
     @Test
     @DisplayName("3. ProjectMember persists association between Project and User with ProjectRole")
     void persistAndQueryProjectMember() {
-        Project project = projectRepository.saveAndFlush(new Project(UUID.randomUUID(), "Member Project", "member-proj", "desc"));
+        Project project = projectRepository.saveAndFlush(new Project("Member Project", "member-proj", "desc"));
         User user = userRepository.saveAndFlush(new User("dev.member@flowforge.io", "$2a$12$hash3", "Dev Member"));
 
         ProjectMember member = new ProjectMember(project, user, ProjectRole.DEVELOPER);
@@ -130,7 +130,7 @@ class AuthPersistencePostgresTest {
     @Test
     @DisplayName("4. Database enforces unique constraint on (project_id, user_id)")
     void duplicateProjectMembershipRejected() {
-        Project project = projectRepository.saveAndFlush(new Project(UUID.randomUUID(), "Duplicate Test Project", "dup-proj", "desc"));
+        Project project = projectRepository.saveAndFlush(new Project("Duplicate Test Project", "dup-proj", "desc"));
         User user = userRepository.saveAndFlush(new User("dup.member@flowforge.io", "$2a$12$hash4", "Dup Member"));
 
         ProjectMember m1 = new ProjectMember(project, user, ProjectRole.ADMIN);
