@@ -17,6 +17,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Service managing workflow execution concurrency, task dispatching, timeout watchdog, and permit lifecycle.
@@ -34,6 +35,9 @@ public class WorkflowExecutionService {
     private final TaskActionResolver taskActionResolver;
     private final Semaphore workflowSemaphore;
     private final ThreadPoolExecutor workflowDispatcherExecutor;
+    private final ThreadPoolExecutor permitReaperExecutor;
+    private final AtomicBoolean isShutdown = new AtomicBoolean(false);
+    private volatile long reaperStepTimeoutMs = 5000L;
 
     public WorkflowExecutionService(SchedulerProperties properties, TaskActionResolver taskActionResolver) {
         this.properties = properties;
@@ -57,6 +61,25 @@ public class WorkflowExecutionService {
             },
             new ThreadPoolExecutor.AbortPolicy()
         );
+        this.permitReaperExecutor = new ThreadPoolExecutor(
+            properties.getMaxConcurrentWorkflows(),
+            properties.getMaxConcurrentWorkflows(),
+            60L,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(properties.getMaxConcurrentWorkflows()),
+            new ThreadFactory() {
+                private final AtomicInteger counter = new AtomicInteger(1);
+
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "flowforge-permit-reaper-" + counter.getAndIncrement());
+                    t.setDaemon(true);
+                    return t;
+                }
+            },
+            new ThreadPoolExecutor.AbortPolicy()
+        );
+        this.permitReaperExecutor.allowCoreThreadTimeOut(true);
     }
 
     public Semaphore getSemaphore() {
@@ -85,68 +108,21 @@ public class WorkflowExecutionService {
                 ));
         }
 
-        AtomicBoolean permitHandled = new AtomicBoolean(false);
-        CompletableFuture<WorkflowExecutionResult> executionFuture = new CompletableFuture<>();
+        TaskRegistry registry = taskActionResolver.resolveRegistry(request.tasks());
+        TaskGraph graph = buildTaskGraph(request.tasks(), request.edges());
 
-        int concurrency = clampConcurrency(request.concurrency());
-
-        // 3. Dispatch to Bounded Dispatcher Pool
         try {
-            workflowDispatcherExecutor.execute(() -> {
-                // Ownership transferred to this background runnable
-                WorkflowScheduler scheduler = null;
-                try {
-                    scheduler = new WorkflowScheduler(concurrency);
-                    TaskRegistry registry = taskActionResolver.resolveRegistry(request.tasks());
-                    TaskGraph graph = buildTaskGraph(request.tasks(), request.edges());
-
-                    WorkflowExecutionResult result = scheduler.execute(graph, registry);
-                    executionFuture.complete(result);
-                } catch (Throwable t) {
-                    log.error("Workflow execution failed", t);
-                    executionFuture.completeExceptionally(t);
-                } finally {
-                    // Exception-proof cleanup and permit disposition
-                    try {
-                        if (scheduler != null) {
-                            scheduler.close();
-                        }
-                    } catch (Throwable closeError) {
-                        log.error("Exception during scheduler.close()", closeError);
-                    } finally {
-                        boolean canRelease = false;
-                        try {
-                            canRelease = isSchedulerTerminated(scheduler);
-                        } catch (Throwable termError) {
-                            log.error("Exception during scheduler termination check; quarantining permit", termError);
-                            canRelease = false;
-                        }
-
-                        if (canRelease) {
-                            if (permitHandled.compareAndSet(false, true)) {
-                                workflowSemaphore.release();
-                                if (onPermitReleased != null) {
-                                    try {
-                                        onPermitReleased.run();
-                                    } catch (Throwable callbackError) {
-                                        log.error("Exception in onPermitReleased callback", callbackError);
-                                    }
-                                }
-                            }
-                        } else {
-                            // QUARANTINE: Worker threads failed to terminate or termination check threw exception
-                            permitHandled.set(true);
-                            log.error("CRITICAL: Workflow worker threads failed to terminate within deadline or check failed. Capacity permit quarantined.");
-                        }
-                    }
-                }
-            });
+            WorkflowExecutionResult result = executeGraphUnderPermit(
+                graph,
+                registry,
+                clampConcurrency(request.concurrency()),
+                timeout,
+                unit,
+                null,
+                onPermitReleased
+            );
+            return ResponseEntity.ok(toResponseDto(result));
         } catch (RejectedExecutionException e) {
-            // Submission rejected before execution began (e.g. pool shutdown)
-            if (permitHandled.compareAndSet(false, true)) {
-                workflowSemaphore.release();
-            }
-            log.warn("Workflow submission rejected by dispatcher pool", e);
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body(new ApiErrorResponse(
                     503,
@@ -155,12 +131,6 @@ public class WorkflowExecutionService {
                     Instant.now(),
                     Collections.emptyList()
                 ));
-        }
-
-        // 4. HTTP Thread Synchronous Wait with Deadline
-        try {
-            WorkflowExecutionResult result = executionFuture.get(timeout, unit);
-            return ResponseEntity.ok(toResponseDto(result));
         } catch (TimeoutException e) {
             return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
                 .body(new ApiErrorResponse(
@@ -201,6 +171,205 @@ public class WorkflowExecutionService {
                     Instant.now(),
                     Collections.emptyList()
                 ));
+        }
+    }
+
+    enum DispatchState {
+        QUEUED,
+        RUNNING,
+        CANCELLED_IN_QUEUE
+    }
+
+    void releasePermitSafely(AtomicBoolean permitHandled, Runnable onPermitReleased) {
+        if (permitHandled.compareAndSet(false, true)) {
+            workflowSemaphore.release();
+            if (onPermitReleased != null) {
+                try {
+                    onPermitReleased.run();
+                } catch (Throwable callbackError) {
+                    log.error("Exception in onPermitReleased callback", callbackError);
+                }
+            }
+        }
+    }
+
+    void reclaimPermitWhenTerminated(WorkflowScheduler scheduler, AtomicBoolean permitHandled, Runnable onPermitReleased) {
+        if (scheduler == null || isSchedulerTerminated(scheduler)) {
+            releasePermitSafely(permitHandled, onPermitReleased);
+            return;
+        }
+
+        if (isShutdown()) {
+            if (isSchedulerTerminated(scheduler)) {
+                releasePermitSafely(permitHandled, onPermitReleased);
+            } else {
+                log.warn("Application is shutting down. Worker is still executing; permit remains safely quarantined until process termination.");
+            }
+            return;
+        }
+
+        try {
+            permitReaperExecutor.submit(() -> runReaperLoop(scheduler, permitHandled, onPermitReleased));
+        } catch (RejectedExecutionException e) {
+            log.warn("Permit reaper submission rejected; checking termination status", e);
+            if (isSchedulerTerminated(scheduler)) {
+                releasePermitSafely(permitHandled, onPermitReleased);
+            } else if (isShutdown()) {
+                log.warn("Application is shutting down and permit reaper submission was rejected. Worker is still executing; permit remains quarantined until process termination.");
+            } else {
+                log.warn("Permit reaper pool rejected submission during normal operation; launching asynchronous fallback reaper thread.");
+                Thread fallback = new Thread(
+                    () -> runReaperLoop(scheduler, permitHandled, onPermitReleased),
+                    "flowforge-permit-reaper-fallback"
+                );
+                fallback.setDaemon(true);
+                fallback.start();
+            }
+        }
+    }
+
+    void runReaperLoop(WorkflowScheduler scheduler, AtomicBoolean permitHandled, Runnable onPermitReleased) {
+        long totalWaitedMs = 0;
+        while (!permitHandled.get()) {
+            long stepMs = getReaperStepTimeoutMs();
+            try {
+                boolean terminated = scheduler.awaitTermination(stepMs, TimeUnit.MILLISECONDS);
+                if (terminated || isSchedulerTerminated(scheduler)) {
+                    releasePermitSafely(permitHandled, onPermitReleased);
+                    log.info("Quarantined capacity permit successfully reclaimed after delayed worker termination (waited ~{}ms).", totalWaitedMs);
+                    break;
+                }
+                totalWaitedMs += stepMs;
+                if (totalWaitedMs % 30000 < stepMs) {
+                    log.warn("Worker still executing after delayed termination check (waited ~{}s); capacity permit remains quarantined.", totalWaitedMs / 1000);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                if (isSchedulerTerminated(scheduler)) {
+                    releasePermitSafely(permitHandled, onPermitReleased);
+                    log.info("Quarantined capacity permit successfully reclaimed on reaper interruption.");
+                    break;
+                }
+                if (isShutdown()) {
+                    log.warn("Permit reaper interrupted during service shutdown. Worker remained active; permit remains quarantined.");
+                    break;
+                }
+                log.warn("Permit reaper received transient interruption while worker is still alive; continuing reclamation.");
+                Thread.interrupted();
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) {
+                    throw (VirtualMachineError) t;
+                }
+                log.error("Unexpected error in permit reclamation loop; re-checking termination status", t);
+                if (isSchedulerTerminated(scheduler)) {
+                    releasePermitSafely(permitHandled, onPermitReleased);
+                    break;
+                }
+                try {
+                    Thread.sleep(Math.min(stepMs, 1000L));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    if (isShutdown()) {
+                        break;
+                    }
+                    Thread.interrupted();
+                }
+            }
+        }
+    }
+
+    /**
+     * Executes a validated TaskGraph using the caller-acquired workflow permit.
+     * Dispatches execution to the bounded dispatcher pool, monitors watchdog timeout,
+     * and guarantees exception-proof permit cleanup or quarantine upon worker thread termination.
+     *
+     * @param graph validated task graph
+     * @param registry registered executable task actions and retry policies
+     * @param concurrency maximum parallel task worker threads
+     * @param timeout maximum execution duration
+     * @param unit timeout time unit
+     * @param listener optional listener for observing task execution lifecycle events
+     * @param onPermitReleased optional callback invoked when permit is successfully released
+     * @return final workflow execution result
+     */
+    public WorkflowExecutionResult executeGraphUnderPermit(
+        TaskGraph graph,
+        TaskRegistry registry,
+        int concurrency,
+        long timeout,
+        TimeUnit unit,
+        TaskExecutionListener listener,
+        Runnable onPermitReleased
+    ) throws TimeoutException, ExecutionException, InterruptedException {
+        AtomicBoolean permitHandled = new AtomicBoolean(false);
+        CompletableFuture<WorkflowExecutionResult> executionFuture = new CompletableFuture<>();
+        AtomicReference<WorkflowScheduler> schedulerRef = new AtomicReference<>();
+        AtomicReference<DispatchState> dispatchState = new AtomicReference<>(DispatchState.QUEUED);
+
+        Future<?> dispatchFuture = null;
+        try {
+            dispatchFuture = workflowDispatcherExecutor.submit(() -> {
+                if (!dispatchState.compareAndSet(DispatchState.QUEUED, DispatchState.RUNNING)) {
+                    // Cancelled while queued; caller already safely handled permit release
+                    return;
+                }
+                WorkflowScheduler scheduler = null;
+                try {
+                    scheduler = new WorkflowScheduler(concurrency);
+                    schedulerRef.set(scheduler);
+                    WorkflowExecutionResult result = scheduler.execute(graph, registry, listener);
+                    executionFuture.complete(result);
+                } catch (Throwable t) {
+                    log.error("Workflow execution failed", t);
+                    executionFuture.completeExceptionally(t);
+                } finally {
+                    try {
+                        closeScheduler(scheduler);
+                    } catch (Throwable closeError) {
+                        log.error("Exception during scheduler.close()", closeError);
+                    } finally {
+                        boolean canRelease = false;
+                        try {
+                            canRelease = isSchedulerTerminated(scheduler);
+                        } catch (Throwable termError) {
+                            log.error("Exception during scheduler termination check; quarantining permit", termError);
+                            canRelease = false;
+                        }
+
+                        if (canRelease) {
+                            releasePermitSafely(permitHandled, onPermitReleased);
+                        } else {
+                            // Preserves capacity bound while worker is still running.
+                            // Asynchronously reclaim permit once the scheduler actually terminates.
+                            reclaimPermitWhenTerminated(scheduler, permitHandled, onPermitReleased);
+                        }
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            releasePermitSafely(permitHandled, onPermitReleased);
+            log.warn("Workflow submission rejected by dispatcher pool", e);
+            throw e;
+        }
+
+        try {
+            return executionFuture.get(timeout, unit);
+        } catch (TimeoutException | InterruptedException e) {
+            executionFuture.cancel(true);
+            WorkflowScheduler s = schedulerRef.get();
+            if (s != null) {
+                s.cancel();
+            }
+            if (dispatchFuture != null) {
+                dispatchFuture.cancel(true);
+            }
+            if (dispatchState.compareAndSet(DispatchState.QUEUED, DispatchState.CANCELLED_IN_QUEUE)) {
+                // Task was cancelled before dispatcher thread started running.
+                // The dispatcher runnable will abort at the entry CAS.
+                // Safe to release permit immediately as no worker or scheduler was ever started.
+                releasePermitSafely(permitHandled, onPermitReleased);
+            }
+            throw e;
         }
     }
 
@@ -288,6 +457,12 @@ public class WorkflowExecutionService {
         return scheduler == null || scheduler.isTerminated();
     }
 
+    void closeScheduler(WorkflowScheduler scheduler) {
+        if (scheduler != null) {
+            scheduler.close();
+        }
+    }
+
     public ExecuteWorkflowResponse toResponseDto(WorkflowExecutionResult result) {
         Instant startedAt = result.startedAt();
         Instant completedAt = result.completedAt();
@@ -325,16 +500,35 @@ public class WorkflowExecutionService {
         );
     }
 
+    public boolean isShutdown() {
+        return isShutdown.get();
+    }
+
+    long getReaperStepTimeoutMs() {
+        return reaperStepTimeoutMs;
+    }
+
+    void setReaperStepTimeoutMs(long ms) {
+        this.reaperStepTimeoutMs = ms;
+    }
+
+    ThreadPoolExecutor getPermitReaperExecutor() {
+        return permitReaperExecutor;
+    }
+
     @PreDestroy
     public void shutdown() {
-        workflowDispatcherExecutor.shutdown();
-        try {
-            if (!workflowDispatcherExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+        if (isShutdown.compareAndSet(false, true)) {
+            workflowDispatcherExecutor.shutdown();
+            permitReaperExecutor.shutdownNow();
+            try {
+                if (!workflowDispatcherExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                    workflowDispatcherExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
                 workflowDispatcherExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
             }
-        } catch (InterruptedException e) {
-            workflowDispatcherExecutor.shutdownNow();
-            Thread.currentThread().interrupt();
         }
     }
 }

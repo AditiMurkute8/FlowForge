@@ -1,5 +1,16 @@
 import React from 'react';
-import { GitFork, Layers, BookOpen, Search, Command, AlertCircle, Sun, Moon } from 'lucide-react';
+import {
+  GitFork,
+  Layers,
+  BookOpen,
+  Search,
+  Command,
+  AlertCircle,
+  Sun,
+  Moon,
+  LogIn,
+  LogOut,
+} from 'lucide-react';
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -8,6 +19,10 @@ interface AppShellProps {
   onOpenSearch?: () => void;
   theme?: 'light' | 'dark';
   onToggleTheme?: () => void;
+  user?: { fullName: string; email: string } | null;
+  isAuthenticated?: boolean;
+  onOpenAuth?: (mode?: 'login' | 'register') => void;
+  onLogout?: () => void;
 }
 
 export const AppShell: React.FC<AppShellProps> = ({
@@ -17,6 +32,10 @@ export const AppShell: React.FC<AppShellProps> = ({
   onOpenSearch,
   theme = 'dark',
   onToggleTheme,
+  user,
+  isAuthenticated = false,
+  onOpenAuth,
+  onLogout,
 }) => {
   return (
     <div className="h-full min-h-0 flex flex-col bg-[var(--bg-canvas)] text-[var(--text-primary)]">
@@ -115,6 +134,44 @@ export const AppShell: React.FC<AppShellProps> = ({
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--status-green-text)]" />
               <span className="font-mono text-[var(--text-primary)]">env:default-prod</span>
             </div>
+
+            {/* Auth Actions: Sign In or User Profile / Sign Out */}
+            {isAuthenticated && user ? (
+              <div className="flex items-center gap-2 pl-2 border-l border-[var(--border-default)]">
+                <div
+                  className="flex items-center gap-1.5 text-xs text-[var(--text-primary)]"
+                  title={`${user.fullName} (${user.email})`}
+                >
+                  <div className="h-6 w-6 rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] flex items-center justify-center text-[10px] font-semibold select-none">
+                    {user.fullName ? user.fullName.charAt(0).toUpperCase() : 'U'}
+                  </div>
+                  <span className="hidden xl:inline text-[11px] font-medium max-w-[120px] truncate">
+                    {user.fullName}
+                  </span>
+                </div>
+                {onLogout && (
+                  <button
+                    onClick={onLogout}
+                    className="flex items-center gap-1 rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] px-2 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--status-red-text)] hover:border-[var(--status-red-border)] transition-colors cursor-pointer"
+                    data-testid="header-sign-out-button"
+                  >
+                    <LogOut size={12} />
+                    <span className="hidden sm:inline text-[11px]">Sign Out</span>
+                  </button>
+                )}
+              </div>
+            ) : onOpenAuth ? (
+              <div className="flex items-center gap-1 pl-2 border-l border-[var(--border-default)]">
+                <button
+                  onClick={() => onOpenAuth('login')}
+                  className="flex items-center gap-1.5 rounded-[5px] bg-[var(--accent)] text-[var(--accent-contrast)] px-2.5 py-1 text-xs font-medium hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer shadow-xs"
+                  data-testid="header-sign-in-button"
+                >
+                  <LogIn size={12} />
+                  <span>Sign In</span>
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </header>

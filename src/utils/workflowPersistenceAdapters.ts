@@ -102,6 +102,7 @@ export function buildGraphPayloadFromCanvas(
 export interface SaveWorkflowDraftParams {
   workflowId: string;
   isMock?: boolean;
+  isAuthenticated?: boolean;
   nodes: Node<TaskNodeData>[];
   edges: Edge[];
   versionTag?: string;
@@ -125,6 +126,7 @@ export interface SaveWorkflowDraftParams {
 export async function saveWorkflowDraft({
   workflowId,
   isMock,
+  isAuthenticated,
   nodes,
   edges,
   versionTag,
@@ -141,7 +143,17 @@ export async function saveWorkflowDraft({
     return null;
   }
 
-  // 2. Sample template / mock workflow guard
+  // 2. Authentication guard: prevent saving drafts while unauthenticated
+  if (isAuthenticated === false) {
+    onShowToast(
+      'Authentication Required',
+      'Please sign in to save workflow drafts to the server.',
+      'warning'
+    );
+    return null;
+  }
+
+  // 3. Sample template / mock workflow guard
   if (isMock) {
     onShowToast(
       'Sample Template (Cannot Save)',

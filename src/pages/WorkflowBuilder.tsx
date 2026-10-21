@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef, useContext } from 'react';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -23,18 +23,28 @@ import type {
   ExecuteWorkflowResponse,
   WorkflowResponseDto,
   WorkflowVersionResponseDto,
+  ProjectRole,
 } from '../types';
 import {
   fetchWorkflows as defaultFetchWorkflows,
   createWorkflow as defaultCreateWorkflow,
   getLatestWorkflowVersion as defaultGetLatestWorkflowVersion,
   createWorkflowVersion as defaultCreateWorkflowVersion,
+  fetchWorkflowRuns as defaultFetchWorkflowRuns,
+  getWorkflowRun as defaultGetWorkflowRun,
+  executeWorkflowVersionRun as defaultExecuteWorkflowVersionRun,
+  fetchProjectMembers as defaultFetchProjectMembers,
+  FlowForgeApiError,
 } from '../api/flowForgeApi';
+import { AuthContext } from '../context/AuthContext';
+import { useProjectMembership } from '../utils/useProjectMembership';
+import { ProjectMembersModal } from '../components/project/ProjectMembersModal';
 import { saveWorkflowDraft, restoreCanvasFromGraphPayload } from '../utils/workflowPersistenceAdapters';
 import { CustomTaskNode } from '../components/workflow/CustomTaskNode';
 import { TaskPalette } from '../components/workflow/TaskPalette';
 import { TaskInspector } from '../components/workflow/TaskInspector';
 import { ExecutionModal } from '../components/workflow/ExecutionModal';
+import { RunHistoryModal } from '../components/workflow/RunHistoryModal';
 import {
   executeWorkflowValidation,
 } from '../utils/dagValidationAdapters';
@@ -42,6 +52,10 @@ import {
   executeWorkflowRun,
   type ExecutionRunResult,
 } from '../utils/workflowExecutionAdapters';
+import {
+  executeDurableWorkflowRun,
+  isCanvasDirty,
+} from '../utils/durableExecutionAdapters';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import {
@@ -54,6 +68,9 @@ import {
   RotateCcw,
   Maximize2,
   Loader2,
+  History,
+  Users,
+  Info,
 } from 'lucide-react';
 
 export interface WorkflowBuilderProps {
@@ -67,6 +84,13 @@ export interface WorkflowBuilderProps {
   createWorkflowFn?: typeof defaultCreateWorkflow;
   getLatestVersionFn?: typeof defaultGetLatestWorkflowVersion;
   createVersionFn?: typeof defaultCreateWorkflowVersion;
+  fetchRunsFn?: typeof defaultFetchWorkflowRuns;
+  getRunFn?: typeof defaultGetWorkflowRun;
+  executeDurableRunFn?: typeof defaultExecuteWorkflowVersionRun;
+  fetchMembersFn?: typeof defaultFetchProjectMembers;
+  overrideRole?: ProjectRole | null;
+  isAuthenticated?: boolean;
+  onOpenAuth?: (mode?: 'login' | 'register') => void;
 }
 
 const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
@@ -80,7 +104,18 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   createWorkflowFn = defaultCreateWorkflow,
   getLatestVersionFn = defaultGetLatestWorkflowVersion,
   createVersionFn = defaultCreateWorkflowVersion,
+  fetchRunsFn = defaultFetchWorkflowRuns,
+  getRunFn = defaultGetWorkflowRun,
+  executeDurableRunFn = defaultExecuteWorkflowVersionRun,
+  fetchMembersFn = defaultFetchProjectMembers,
+  overrideRole,
+  isAuthenticated,
+  onOpenAuth,
 }) => {
+  const authContext = useContext(AuthContext);
+  const effectiveIsAuthenticated =
+    isAuthenticated !== undefined ? isAuthenticated : (authContext?.isAuthenticated ?? true);
+
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TaskNodeData>>(INITIAL_DAG_NODES);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(INITIAL_DAG_EDGES);
   const { fitView } = useReactFlow();
@@ -92,6 +127,19 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     slug?: string;
     isMock?: boolean;
   } | null>(null);
+
+  const effectiveProjectId = currentWorkflow?.projectId || projectId;
+  const {
+    role,
+    permissions,
+    isLoading: isLoadingRole,
+  } = useProjectMembership(effectiveProjectId, {
+    fetchMembersFn,
+    overrideRole,
+    isMock: currentWorkflow?.isMock,
+  });
+
+  const [isMembersModalOpen, setIsMembersModalOpen] = useState(false);
   const [currentVersion, setCurrentVersion] = useState<WorkflowVersionResponseDto | null>(null);
   const [isLoadingWorkflow, setIsLoadingWorkflow] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
@@ -101,6 +149,8 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   const [validationResult, setValidationResult] = useState<DagValidationResult | null>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [isSimulateRunModalOpen, setIsSimulateRunModalOpen] = useState(false);
+  const [isRunHistoryOpen, setIsRunHistoryOpen] = useState(false);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState<number>(0);
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionResult, setExecutionResult] = useState<ExecutionRunResult | null>(null);
 
@@ -164,7 +214,19 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
                 });
                 activeWf = { ...created, isMock: false };
               }
-            } catch {
+            } catch (err) {
+              const isAuthError = err instanceof FlowForgeApiError && (err.isUnauthorized || err.status === 401);
+              if (isAuthError) {
+                onShowToast(
+                  'Authentication Required',
+                  'Please sign in to access workflows for this project.',
+                  'warning'
+                );
+                if (onOpenAuth) {
+                  onOpenAuth('login');
+                }
+                return;
+              }
               const mockWf = MOCK_WORKFLOWS.find((w) => w.projectId === projectId) || MOCK_WORKFLOWS[0];
               activeWf = {
                 id: mockWf.id,
@@ -373,6 +435,74 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     }
   }, [nodes, edges, isExecuting, onShowToast, setNodes, executeApiFn]);
 
+  const handleRunDurable = useCallback(async () => {
+    if (isExecutingRef.current || isExecuting) {
+      return;
+    }
+
+    if (!effectiveIsAuthenticated) {
+      onShowToast(
+        'Authentication Required',
+        'Please sign in to execute durable workflow runs.',
+        'warning'
+      );
+      if (onOpenAuth) {
+        onOpenAuth('login');
+      }
+      return;
+    }
+
+    if (!permissions.canExecuteRuns) {
+      onShowToast(
+        'Execution Forbidden',
+        role === 'VIEWER'
+          ? 'Read-only access: Viewers cannot execute durable workflow runs.'
+          : 'You do not have permission to execute durable runs in this project.',
+        'warning'
+      );
+      return;
+    }
+
+    isExecutingRef.current = true;
+    try {
+      await executeDurableWorkflowRun({
+        workflowId: currentWorkflow?.id,
+        workflowName: currentWorkflow?.name,
+        isMockWorkflow: currentWorkflow?.isMock,
+        currentVersion,
+        nodes,
+        edges,
+        isExecuting,
+        setIsExecuting,
+        setNodes,
+        onShowToast,
+        isAuthenticated: effectiveIsAuthenticated,
+        onExecutionComplete: () => {
+          setHistoryRefreshKey((prev) => prev + 1);
+        },
+        executeDurableApiFn: executeDurableRunFn,
+      });
+    } finally {
+      isExecutingRef.current = false;
+    }
+  }, [
+    isExecuting,
+    currentWorkflow?.id,
+    currentWorkflow?.name,
+    currentWorkflow?.isMock,
+    currentVersion,
+    nodes,
+    edges,
+    setIsExecuting,
+    setNodes,
+    onShowToast,
+    executeDurableRunFn,
+    effectiveIsAuthenticated,
+    onOpenAuth,
+    permissions.canExecuteRuns,
+    role,
+  ]);
+
   const applyValidationVisuals = useCallback(
     (result: DagValidationResult) => {
       if (result.hasCycle) {
@@ -417,6 +547,29 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
       return;
     }
 
+    if (!effectiveIsAuthenticated) {
+      onShowToast(
+        'Authentication Required',
+        'Please sign in to save workflow drafts to the server.',
+        'warning'
+      );
+      if (onOpenAuth) {
+        onOpenAuth('login');
+      }
+      return;
+    }
+
+    if (!permissions.canEditWorkflows) {
+      onShowToast(
+        'Save Forbidden',
+        role === 'VIEWER'
+          ? 'Read-only access: Viewers cannot save workflow drafts.'
+          : 'You do not have permission to modify workflows in this project.',
+        'warning'
+      );
+      return;
+    }
+
     if (!currentWorkflow?.id || currentWorkflow.isMock) {
       onShowToast(
         'Sample Template (Cannot Save)',
@@ -433,6 +586,7 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
       const saved = await saveWorkflowDraft({
         workflowId: currentWorkflow.id,
         isMock: currentWorkflow.isMock,
+        isAuthenticated: effectiveIsAuthenticated,
         nodes,
         edges,
         versionTag: currentVersion ? `v${currentVersion.versionNumber + 1}.0` : undefined,
@@ -508,12 +662,25 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
                 {currentVersion.isValidDag ? 'DAG Valid' : 'Cyclic Draft'}
               </Badge>
             )}
+            {currentVersion && isCanvasDirty(nodes, edges, currentVersion) && (
+              <Badge variant="warning" size="sm" data-testid="unsaved-edits-badge">
+                Unsaved Edits
+              </Badge>
+            )}
             {isLoadingWorkflow && (
               <Badge variant="outline" size="sm">
                 <Loader2 size={10} className="animate-spin mr-1 text-[var(--accent-blue)]" />
                 Syncing...
               </Badge>
             )}
+            {/* User Project Role Badge */}
+            <Badge
+              variant={role === 'ADMIN' ? 'cyan' : role === 'DEVELOPER' ? 'default' : 'outline'}
+              size="sm"
+              data-testid="user-project-role-badge"
+            >
+              Role: {role ?? (isLoadingRole ? 'Verifying...' : 'Viewer')}
+            </Badge>
           </div>
         </div>
 
@@ -549,11 +716,42 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
           </Button>
 
           <Button
+            variant="outline"
+            size="sm"
+            icon={<History size={12} />}
+            onClick={() => setIsRunHistoryOpen(true)}
+            data-testid="run-history-button"
+          >
+            Run History
+          </Button>
+
+          {/* Admin Only: Membership Management */}
+          {permissions.canManageMembers && effectiveProjectId && !currentWorkflow?.isMock && (
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<Users size={12} />}
+              onClick={() => setIsMembersModalOpen(true)}
+              data-testid="workflow-builder-members-button"
+              title="Manage project members and roles"
+            >
+              Members
+            </Button>
+          )}
+
+          <Button
             variant="secondary"
             size="sm"
             icon={isSavingDraft ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
             onClick={() => void handleSaveDraft()}
-            disabled={isSavingDraft || isLoadingWorkflow}
+            disabled={isSavingDraft || isLoadingWorkflow || !permissions.canEditWorkflows}
+            title={
+              !permissions.canEditWorkflows
+                ? role === 'VIEWER'
+                  ? 'Read-only access: Viewers cannot save workflow drafts'
+                  : 'Saving disabled for current role'
+                : undefined
+            }
             data-testid="save-draft-button"
           >
             {isSavingDraft ? 'Saving Draft...' : 'Save Draft'}
@@ -564,18 +762,53 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
             size="sm"
             icon={isExecuting ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
             onClick={() => {
-              if (isExecuting) {
-                setIsSimulateRunModalOpen(true);
+              if (currentWorkflow?.isMock) {
+                if (isExecuting) {
+                  setIsSimulateRunModalOpen(true);
+                } else {
+                  void handleRunSimulation();
+                }
               } else {
-                void handleRunSimulation();
+                void handleRunDurable();
               }
             }}
-            data-testid="run-simulated-button"
+            disabled={
+              isExecuting ||
+              (!currentWorkflow?.isMock && !permissions.canExecuteRuns)
+            }
+            title={
+              !currentWorkflow?.isMock && !permissions.canExecuteRuns
+                ? role === 'VIEWER'
+                  ? 'Read-only access: Viewers cannot execute durable runs'
+                  : 'Execution disabled for current role'
+                : undefined
+            }
+            data-testid={currentWorkflow?.isMock ? 'run-simulated-button' : 'run-durable-button'}
           >
-            {isExecuting ? 'View Active Run...' : 'Run (Simulated)'}
+            {isExecuting
+              ? 'Executing...'
+              : currentWorkflow?.isMock
+              ? 'Run (Simulated)'
+              : currentVersion
+              ? `Run v${currentVersion.versionNumber}`
+              : 'Run'}
           </Button>
         </div>
       </div>
+
+      {/* Read-Only Viewer Notice Banner */}
+      {role === 'VIEWER' && !currentWorkflow?.isMock && (
+        <div
+          role="status"
+          className="flex items-center gap-2 border-b border-[var(--border-default)] bg-[var(--bg-subsurface)] px-4 py-1.5 text-xs text-[var(--text-secondary)] shrink-0"
+          data-testid="viewer-read-only-banner"
+        >
+          <Info size={13} className="text-[var(--accent-blue)] shrink-0" />
+          <span>
+            <strong>Read-Only Access:</strong> You hold Viewer permissions for this project workspace. Canvas edits cannot be saved and durable runs are disabled.
+          </span>
+        </div>
+      )}
 
       {/* Validation Status Notification */}
       {validationResult && (
@@ -675,6 +908,31 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
         onRunExecution={handleRunSimulation}
         nodes={nodes}
       />
+
+      {/* Durable Run History Modal */}
+      <RunHistoryModal
+        isOpen={isRunHistoryOpen}
+        onClose={() => setIsRunHistoryOpen(false)}
+        workflowId={currentWorkflow?.id}
+        workflowName={currentWorkflow?.name}
+        isMockWorkflow={currentWorkflow?.isMock}
+        fetchRunsFn={fetchRunsFn}
+        getRunFn={getRunFn}
+        refreshTrigger={historyRefreshKey}
+      />
+
+      {/* Project Members Modal for Admin */}
+      {effectiveProjectId && isMembersModalOpen && (
+        <ProjectMembersModal
+          isOpen={isMembersModalOpen}
+          onClose={() => setIsMembersModalOpen(false)}
+          projectId={effectiveProjectId}
+          projectName={currentWorkflow?.name || 'Project'}
+          currentUserRole={role}
+          fetchMembersFn={fetchMembersFn}
+          onShowToast={onShowToast}
+        />
+      )}
     </div>
   );
 };

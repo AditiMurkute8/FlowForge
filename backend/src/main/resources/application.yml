@@ -29,3 +29,8 @@ management:
     web:
       exposure:
         include: health,info
+
+flowforge:
+  jwt:
+    secret: ${FLOWFORGE_JWT_SECRET:}
+    expiration-ms: ${FLOWFORGE_JWT_EXPIRATION_MS:86400000}

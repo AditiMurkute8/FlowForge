@@ -134,7 +134,7 @@ class ProjectServiceTest {
     void testDeleteProjectSuccess() {
         UUID id = UUID.randomUUID();
         Project project = new Project("Test", "test", "Desc");
-        when(projectRepository.findById(id)).thenReturn(Optional.of(project));
+        when(projectRepository.findByIdWithPessimisticLock(id)).thenReturn(Optional.of(project));
         when(workflowRepository.countByProjectId(id)).thenReturn(0L);
 
         projectService.deleteProject(id);
@@ -147,7 +147,7 @@ class ProjectServiceTest {
     void testDeleteProjectWithDependentWorkflows() {
         UUID id = UUID.randomUUID();
         Project project = new Project("Test", "test", "Desc");
-        when(projectRepository.findById(id)).thenReturn(Optional.of(project));
+        when(projectRepository.findByIdWithPessimisticLock(id)).thenReturn(Optional.of(project));
         when(workflowRepository.countByProjectId(id)).thenReturn(2L);
 
         assertThatThrownBy(() -> projectService.deleteProject(id))

@@ -4,12 +4,15 @@ import com.flowforge.api.dto.ApiErrorResponse;
 import com.flowforge.core.InvalidDagException;
 import com.flowforge.service.exception.ResourceConflictException;
 import com.flowforge.service.exception.ResourceNotFoundException;
+import com.flowforge.service.exception.WorkflowCapacityExhaustedException;
+import com.flowforge.service.exception.WorkflowExecutionTimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -47,6 +50,32 @@ public class RestExceptionHandler {
                 409,
                 "Conflict",
                 e.getMessage(),
+                Instant.now(),
+                Collections.emptyList()
+            ));
+    }
+
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ApiErrorResponse> handleAuthenticationException(AuthenticationException e) {
+        log.warn("Authentication failed: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+            .body(new ApiErrorResponse(
+                401,
+                "Unauthorized",
+                e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : "Invalid email or password",
+                Instant.now(),
+                Collections.emptyList()
+            ));
+    }
+
+    @ExceptionHandler(org.springframework.security.access.AccessDeniedException.class)
+    public ResponseEntity<ApiErrorResponse> handleAccessDenied(org.springframework.security.access.AccessDeniedException e) {
+        log.warn("Access denied: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+            .body(new ApiErrorResponse(
+                403,
+                "Forbidden",
+                e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : "Access denied",
                 Instant.now(),
                 Collections.emptyList()
             ));
@@ -184,6 +213,51 @@ public class RestExceptionHandler {
                 "Invalid request parameters",
                 Instant.now(),
                 details
+            ));
+    }
+
+    @ExceptionHandler(WorkflowCapacityExhaustedException.class)
+    public ResponseEntity<ApiErrorResponse> handleCapacityExhausted(WorkflowCapacityExhaustedException e) {
+        log.warn("Workflow capacity exhausted: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+            .header("Retry-After", "5")
+            .body(new ApiErrorResponse(
+                429,
+                "Too Many Requests",
+                e.getMessage(),
+                Instant.now(),
+                Collections.emptyList()
+            ));
+    }
+
+    @ExceptionHandler(WorkflowExecutionTimeoutException.class)
+    public ResponseEntity<ApiErrorResponse> handleExecutionTimeout(WorkflowExecutionTimeoutException e) {
+        log.warn("Workflow execution timed out: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
+            .body(new ApiErrorResponse(
+                504,
+                "Gateway Timeout",
+                e.getMessage(),
+                Instant.now(),
+                Collections.emptyList()
+            ));
+    }
+
+    @ExceptionHandler({
+        org.springframework.dao.PessimisticLockingFailureException.class,
+        org.springframework.dao.CannotAcquireLockException.class,
+        jakarta.persistence.PessimisticLockException.class,
+        jakarta.persistence.LockTimeoutException.class
+    })
+    public ResponseEntity<ApiErrorResponse> handleLockingFailure(Exception e) {
+        log.warn("Database lock acquisition failure: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+            .body(new ApiErrorResponse(
+                409,
+                "Conflict",
+                "Concurrent modification conflict: Unable to acquire lock on project. Please retry.",
+                Instant.now(),
+                Collections.emptyList()
             ));
     }
 

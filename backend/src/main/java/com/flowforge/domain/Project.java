@@ -48,6 +48,9 @@ public class Project {
     @OneToMany(mappedBy = "project", fetch = FetchType.LAZY)
     private List<Workflow> workflows = new ArrayList<>();
 
+    @OneToMany(mappedBy = "project", fetch = FetchType.LAZY)
+    private List<ProjectMember> members = new ArrayList<>();
+
     public Project() {
         // Required default JPA constructor
     }
@@ -119,6 +122,28 @@ public class Project {
 
     public void setWorkflows(List<Workflow> workflows) {
         this.workflows = workflows;
+    }
+
+    public List<ProjectMember> getMembers() {
+        return members;
+    }
+
+    public void setMembers(List<ProjectMember> members) {
+        this.members = members != null ? members : new ArrayList<>();
+    }
+
+    public void addMember(ProjectMember member) {
+        if (member != null) {
+            this.members.add(member);
+            member.setProject(this);
+        }
+    }
+
+    public void removeMember(ProjectMember member) {
+        if (member != null) {
+            this.members.remove(member);
+            member.setProject(null);
+        }
     }
 
     @Override

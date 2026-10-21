@@ -6,6 +6,7 @@ import com.flowforge.domain.WorkflowVersion;
 import com.flowforge.persistence.repository.WorkflowRepository;
 import com.flowforge.persistence.repository.WorkflowVersionRepository;
 import com.flowforge.service.exception.ResourceNotFoundException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -16,7 +17,7 @@ import java.util.UUID;
 
 /**
  * Service managing immutable WorkflowVersion creation, pessimistic row locking,
- * version number allocation, and snapshot retrieval.
+ * version number allocation, snapshot retrieval, and project-scoped RBAC enforcement.
  */
 @Service
 @Transactional(readOnly = true)
@@ -25,22 +26,35 @@ public class WorkflowVersionService {
     private final WorkflowRepository workflowRepository;
     private final WorkflowVersionRepository workflowVersionRepository;
     private final WorkflowSnapshotConverter snapshotConverter;
+    private final ProjectAuthorizationService authorizationService;
 
     public WorkflowVersionService(WorkflowRepository workflowRepository,
                                   WorkflowVersionRepository workflowVersionRepository,
                                   WorkflowSnapshotConverter snapshotConverter) {
+        this(workflowRepository, workflowVersionRepository, snapshotConverter, null);
+    }
+
+    @Autowired
+    public WorkflowVersionService(
+        WorkflowRepository workflowRepository,
+        WorkflowVersionRepository workflowVersionRepository,
+        WorkflowSnapshotConverter snapshotConverter,
+        ProjectAuthorizationService authorizationService
+    ) {
         this.workflowRepository = workflowRepository;
         this.workflowVersionRepository = workflowVersionRepository;
         this.snapshotConverter = snapshotConverter;
+        this.authorizationService = authorizationService;
     }
 
     /**
      * Creates an immutable WorkflowVersion snapshot.
      * Uses pessimistic write locking on the parent Workflow row to serialize version allocation.
+     * Requires DEVELOPER or ADMIN role on the parent project.
      * Derives taskCount, edgeCount, and isValidDag on the server.
      *
      * @param workflowId parent workflow UUID
-     * @param versionName optional human-readable version label (e.g. "v1.0.0"); defaults to "v{number}" if omitted
+     * @param versionTag optional human-readable version label (e.g. "v1.0.0"); defaults to "v{number}" if omitted
      * @param description optional changelog or snapshot notes
      * @param rawPayload client graph payload (React Flow canvas structure or legacy tasks)
      * @return persisted immutable WorkflowVersion
@@ -54,6 +68,10 @@ public class WorkflowVersionService {
         // 1. Lock the parent workflow row before allocating MAX(version_number) + 1
         Workflow workflow = workflowRepository.findByIdForUpdate(workflowId)
                 .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + workflowId));
+
+        if (authorizationService != null) {
+            authorizationService.requireEditAccess(workflow.getProject().getId());
+        }
 
         // 2. Validate snapshot structure, strip transient telemetry, and derive TaskGraph / DagValidationResult
         WorkflowSnapshot snapshot = snapshotConverter.convertAndValidate(rawPayload);
@@ -94,8 +112,14 @@ public class WorkflowVersionService {
 
     public WorkflowVersion getLatestVersion(UUID workflowId) {
         Objects.requireNonNull(workflowId, "Workflow ID must not be null");
-        if (!workflowRepository.existsById(workflowId)) {
-            throw new ResourceNotFoundException("Workflow not found: " + workflowId);
+        if (authorizationService != null) {
+            Workflow workflow = workflowRepository.findById(workflowId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + workflowId));
+            authorizationService.requireReadAccess(workflow.getProject().getId());
+        } else {
+            if (!workflowRepository.existsById(workflowId)) {
+                throw new ResourceNotFoundException("Workflow not found: " + workflowId);
+            }
         }
         return workflowVersionRepository.findFirstByWorkflowIdOrderByVersionNumberDesc(workflowId)
                 .orElseThrow(() -> new ResourceNotFoundException("Workflow has no saved versions"));
@@ -103,8 +127,14 @@ public class WorkflowVersionService {
 
     public WorkflowVersion getVersionByNumber(UUID workflowId, int versionNumber) {
         Objects.requireNonNull(workflowId, "Workflow ID must not be null");
-        if (!workflowRepository.existsById(workflowId)) {
-            throw new ResourceNotFoundException("Workflow not found: " + workflowId);
+        if (authorizationService != null) {
+            Workflow workflow = workflowRepository.findById(workflowId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + workflowId));
+            authorizationService.requireReadAccess(workflow.getProject().getId());
+        } else {
+            if (!workflowRepository.existsById(workflowId)) {
+                throw new ResourceNotFoundException("Workflow not found: " + workflowId);
+            }
         }
         return workflowVersionRepository.findByWorkflowIdAndVersionNumber(workflowId, versionNumber)
                 .orElseThrow(() -> new ResourceNotFoundException(
@@ -113,8 +143,14 @@ public class WorkflowVersionService {
 
     public Page<WorkflowVersion> listVersions(UUID workflowId, Pageable pageable) {
         Objects.requireNonNull(workflowId, "Workflow ID must not be null");
-        if (!workflowRepository.existsById(workflowId)) {
-            throw new ResourceNotFoundException("Workflow not found: " + workflowId);
+        if (authorizationService != null) {
+            Workflow workflow = workflowRepository.findById(workflowId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + workflowId));
+            authorizationService.requireReadAccess(workflow.getProject().getId());
+        } else {
+            if (!workflowRepository.existsById(workflowId)) {
+                throw new ResourceNotFoundException("Workflow not found: " + workflowId);
+            }
         }
         return workflowVersionRepository.findByWorkflowIdOrderByVersionNumberDesc(workflowId, pageable);
     }

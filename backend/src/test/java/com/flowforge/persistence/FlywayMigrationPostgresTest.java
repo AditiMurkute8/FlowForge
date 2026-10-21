@@ -37,18 +37,22 @@ class FlywayMigrationPostgresTest {
                 .load();
 
         int applied = flyway.migrate().migrationsExecuted;
-        assertThat(applied).isGreaterThanOrEqualTo(2);
+        assertThat(applied).isGreaterThanOrEqualTo(4);
 
         MigrationInfo current = flyway.info().current();
         assertThat(current).isNotNull();
-        assertThat(current.getVersion().getVersion()).isEqualTo("2");
-        assertThat(current.getDescription()).isEqualTo("prevent workflow version deletion");
+        assertThat(current.getVersion().getVersion()).isEqualTo("4");
+        assertThat(current.getDescription()).isEqualTo("create auth and rbac schema");
 
-        assertThat(flyway.info().applied()).hasSize(2);
+        assertThat(flyway.info().applied()).hasSize(4);
         assertThat(flyway.info().applied()[0].getVersion().getVersion()).isEqualTo("1");
         assertThat(flyway.info().applied()[0].getDescription()).isEqualTo("create initial schema");
         assertThat(flyway.info().applied()[1].getVersion().getVersion()).isEqualTo("2");
         assertThat(flyway.info().applied()[1].getDescription()).isEqualTo("prevent workflow version deletion");
+        assertThat(flyway.info().applied()[2].getVersion().getVersion()).isEqualTo("3");
+        assertThat(flyway.info().applied()[2].getDescription()).isEqualTo("create workflow runs schema");
+        assertThat(flyway.info().applied()[3].getVersion().getVersion()).isEqualTo("4");
+        assertThat(flyway.info().applied()[3].getDescription()).isEqualTo("create auth and rbac schema");
     }
 
 
@@ -434,6 +438,117 @@ class FlywayMigrationPostgresTest {
                     assertThat(rs.getBoolean("is_valid_dag")).isTrue();
                     assertThat(rs.getString("first_label")).isEqualTo("Ingest Stream");
                     assertThat(rs.getString("concurrency")).isEqualTo("2");
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("13. V4 Migration creates users and project_members tables with expected columns")
+    void v4AuthAndRbacTablesCreated() throws Exception {
+        try (Connection conn = getConnection()) {
+            DatabaseMetaData metaData = conn.getMetaData();
+
+            // Check users table
+            try (ResultSet rs = metaData.getTables(null, "public", "users", new String[]{"TABLE"})) {
+                assertThat(rs.next()).as("users table should exist").isTrue();
+            }
+
+            // Check project_members table
+            try (ResultSet rs = metaData.getTables(null, "public", "project_members", new String[]{"TABLE"})) {
+                assertThat(rs.next()).as("project_members table should exist").isTrue();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("14. V4 users table enforces unique normalized email constraint")
+    void v4UserUniqueNormalizedEmailConstraint() throws Exception {
+        UUID user1Id = UUID.randomUUID();
+        UUID user2Id = UUID.randomUUID();
+
+        try (Connection conn = getConnection()) {
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "INSERT INTO users (id, email, password_hash, is_active) VALUES (?, ?, ?, ?)")) {
+                stmt.setObject(1, user1Id);
+                stmt.setString(2, "alice@flowforge.io");
+                stmt.setString(3, "$2a$12$somevalidhashstringforexample12345678901234567890123456789012");
+                stmt.setBoolean(4, true);
+                stmt.executeUpdate();
+            }
+
+            // Attempting to insert duplicate email (case-insensitive duplicate check via lower(email) or exact unique)
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "INSERT INTO users (id, email, password_hash, is_active) VALUES (?, ?, ?, ?)")) {
+                stmt.setObject(1, user2Id);
+                stmt.setString(2, "alice@flowforge.io");
+                stmt.setString(3, "$2a$12$anotherhashstringforexample12345678901234567890123456789012");
+                stmt.setBoolean(4, true);
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("15. V4 project_members enforces role constraint (ADMIN, DEVELOPER, VIEWER) and cascade delete")
+    void v4ProjectMemberRoleConstraintAndCascade() throws Exception {
+        UUID projectId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID memberId = UUID.randomUUID();
+
+        try (Connection conn = getConnection()) {
+            // Insert project
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "INSERT INTO projects (id, name, slug) VALUES (?, ?, ?)")) {
+                stmt.setObject(1, projectId);
+                stmt.setString(2, "RBAC Test Project");
+                stmt.setString(3, "rbac-test-proj-" + projectId.toString().substring(0, 8));
+                stmt.executeUpdate();
+            }
+
+            // Insert user
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)")) {
+                stmt.setObject(1, userId);
+                stmt.setString(2, "rbac-" + userId.toString().substring(0, 8) + "@flowforge.io");
+                stmt.setString(3, "$2a$12$somevalidhashstringforexample12345678901234567890123456789012");
+                stmt.executeUpdate();
+            }
+
+            // Insert member with valid role DEVELOPER
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "INSERT INTO project_members (id, project_id, user_id, role) VALUES (?, ?, ?, ?)")) {
+                stmt.setObject(1, memberId);
+                stmt.setObject(2, projectId);
+                stmt.setObject(3, userId);
+                stmt.setString(4, "DEVELOPER");
+                stmt.executeUpdate();
+            }
+
+            // Attempt to insert member with invalid role should fail constraint
+            UUID invalidMemberId = UUID.randomUUID();
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "INSERT INTO project_members (id, project_id, user_id, role) VALUES (?, ?, ?, ?)")) {
+                stmt.setObject(1, invalidMemberId);
+                stmt.setObject(2, projectId);
+                stmt.setObject(3, userId);
+                stmt.setString(4, "INVALID_ROLE");
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class);
+            }
+
+            // Deleting project cascades to project_members
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM projects WHERE id = ?")) {
+                stmt.setObject(1, projectId);
+                stmt.executeUpdate();
+            }
+
+            try (PreparedStatement stmt = conn.prepareStatement("SELECT COUNT(*) FROM project_members WHERE id = ?")) {
+                stmt.setObject(1, memberId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getInt(1)).isEqualTo(0);
                 }
             }
         }

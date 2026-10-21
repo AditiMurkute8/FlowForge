@@ -15,3 +15,7 @@ spring:
   flyway:
     enabled: false
 
+flowforge:
+  jwt:
+    secret: "test-jwt-secret-key-that-is-at-least-32-characters-long-for-hmac256"
+    expiration-ms: 3600000

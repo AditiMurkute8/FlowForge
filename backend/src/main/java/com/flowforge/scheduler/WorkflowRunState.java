@@ -22,5 +22,17 @@ public enum WorkflowRunState {
     /**
      * At least one task in the workflow failed.
      */
-    FAILED
+    FAILED,
+
+    /**
+     * Workflow execution was cancelled or timed out.
+     */
+    CANCELLED;
+
+    /**
+     * Returns true if the workflow run state is terminal (COMPLETED, FAILED, or CANCELLED).
+     */
+    public boolean isTerminal() {
+        return this == COMPLETED || this == FAILED || this == CANCELLED;
+    }
 }

@@ -7,6 +7,7 @@ import com.flowforge.persistence.repository.WorkflowRepository;
 import com.flowforge.persistence.repository.WorkflowVersionRepository;
 import com.flowforge.service.exception.ResourceConflictException;
 import com.flowforge.service.exception.ResourceNotFoundException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -16,7 +17,8 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Service managing Workflow definitions, project-scoped slug generation, and uniqueness validation.
+ * Service managing Workflow definitions, project-scoped slug generation, uniqueness validation,
+ * and project-scoped RBAC enforcement.
  */
 @Service
 @Transactional(readOnly = true)
@@ -25,17 +27,30 @@ public class WorkflowService {
     private final WorkflowRepository workflowRepository;
     private final ProjectRepository projectRepository;
     private final WorkflowVersionRepository workflowVersionRepository;
+    private final ProjectAuthorizationService authorizationService;
 
     public WorkflowService(WorkflowRepository workflowRepository,
                            ProjectRepository projectRepository,
                            WorkflowVersionRepository workflowVersionRepository) {
+        this(workflowRepository, projectRepository, workflowVersionRepository, null);
+    }
+
+    @Autowired
+    public WorkflowService(
+        WorkflowRepository workflowRepository,
+        ProjectRepository projectRepository,
+        WorkflowVersionRepository workflowVersionRepository,
+        ProjectAuthorizationService authorizationService
+    ) {
         this.workflowRepository = workflowRepository;
         this.projectRepository = projectRepository;
         this.workflowVersionRepository = workflowVersionRepository;
+        this.authorizationService = authorizationService;
     }
 
     /**
      * Creates a new Workflow under a parent Project with a project-scoped unique slug.
+     * Requires DEVELOPER or ADMIN role on the parent project.
      *
      * @param projectId parent Project UUID
      * @param name workflow display name
@@ -49,6 +64,10 @@ public class WorkflowService {
     @Transactional
     public Workflow createWorkflow(UUID projectId, String name, String slug, String description) {
         Objects.requireNonNull(projectId, "Project ID must not be null");
+        if (authorizationService != null) {
+            authorizationService.requireEditAccess(projectId);
+        }
+
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new ResourceNotFoundException("Project not found: " + projectId));
 
@@ -74,13 +93,20 @@ public class WorkflowService {
 
     public Workflow getWorkflowById(UUID id) {
         Objects.requireNonNull(id, "Workflow ID must not be null");
-        return workflowRepository.findById(id)
+        Workflow workflow = workflowRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + id));
+        if (authorizationService != null) {
+            authorizationService.requireReadAccess(workflow.getProject().getId());
+        }
+        return workflow;
     }
 
     public Workflow getWorkflowByProjectAndSlug(UUID projectId, String slug) {
         Objects.requireNonNull(projectId, "Project ID must not be null");
         Objects.requireNonNull(slug, "Slug must not be null");
+        if (authorizationService != null) {
+            authorizationService.requireReadAccess(projectId);
+        }
         if (!projectRepository.existsById(projectId)) {
             throw new ResourceNotFoundException("Project not found: " + projectId);
         }
@@ -91,6 +117,9 @@ public class WorkflowService {
 
     public Page<Workflow> listWorkflowsByProject(UUID projectId, Pageable pageable) {
         Objects.requireNonNull(projectId, "Project ID must not be null");
+        if (authorizationService != null) {
+            authorizationService.requireReadAccess(projectId);
+        }
         if (!projectRepository.existsById(projectId)) {
             throw new ResourceNotFoundException("Project not found: " + projectId);
         }
@@ -100,7 +129,11 @@ public class WorkflowService {
     @Transactional
     public void deleteWorkflow(UUID id) {
         Objects.requireNonNull(id, "Workflow ID must not be null");
-        Workflow workflow = getWorkflowById(id);
+        Workflow workflow = workflowRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + id));
+        if (authorizationService != null) {
+            authorizationService.requireEditAccess(workflow.getProject().getId());
+        }
         if (workflowVersionRepository.countByWorkflowId(id) > 0) {
             throw new ResourceConflictException("Cannot delete workflow because dependent versions exist");
         }

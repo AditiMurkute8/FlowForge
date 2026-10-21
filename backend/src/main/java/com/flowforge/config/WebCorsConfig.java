@@ -14,8 +14,9 @@ public class WebCorsConfig implements WebMvcConfigurer {
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
             .allowedOrigins("http://localhost:5173")
-            .allowedMethods("GET", "POST", "OPTIONS")
-            .allowedHeaders("Content-Type", "Accept")
+            .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH")
+            .allowedHeaders("Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With")
+            .exposedHeaders("Authorization")
             .maxAge(3600);
     }
 }
