@@ -444,6 +444,9 @@ public final class WorkflowScheduler implements AutoCloseable {
                     other.scheduledRetry = null;
                 }
                 if (other.state == TaskState.PENDING) {
+                    if (other.activeFuture != null) {
+                        other.activeFuture.cancel(false);
+                    }
                     other.state = TaskState.CANCELLED;
                     other.completedAt = Instant.now();
                     notifyTaskCancelled(other);

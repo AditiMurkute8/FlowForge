@@ -7,17 +7,23 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.flowforge.domain.Project;
 import com.flowforge.domain.Workflow;
 import com.flowforge.domain.WorkflowVersion;
+import com.flowforge.domain.User;
+import com.flowforge.persistence.repository.ProjectMemberRepository;
 import com.flowforge.persistence.repository.ProjectRepository;
+import com.flowforge.persistence.repository.UserRepository;
 import com.flowforge.persistence.repository.WorkflowRepository;
 import com.flowforge.persistence.repository.WorkflowVersionRepository;
 import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import com.flowforge.api.RestExceptionHandler;
+import com.flowforge.service.ProjectAuthorizationService;
 import com.flowforge.service.ProjectService;
 import com.flowforge.service.WorkflowService;
 import com.flowforge.service.WorkflowVersionService;
@@ -26,6 +32,8 @@ import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -33,6 +41,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.sql.SQLException;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -59,7 +68,7 @@ import org.springframework.transaction.annotation.Transactional;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
-@Import({ProjectService.class, WorkflowService.class, WorkflowVersionService.class, WorkflowSnapshotConverter.class})
+@Import({ProjectService.class, WorkflowService.class, WorkflowVersionService.class, WorkflowSnapshotConverter.class, ProjectAuthorizationService.class})
 class ProjectWorkflowPersistencePostgresTest {
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
@@ -110,6 +119,31 @@ class ProjectWorkflowPersistencePostgresTest {
 
     @Autowired
     private WorkflowVersionService workflowVersionService;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private ProjectMemberRepository projectMemberRepository;
+
+    private User testUser;
+
+    @BeforeEach
+    void setUpSecurity() {
+        testUser = userRepository.save(new User(
+                "persistence_tester_" + UUID.randomUUID() + "@flowforge.internal",
+                "pw_hash",
+                "Persistence Tester"
+        ));
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(testUser, null, Collections.emptyList())
+        );
+    }
+
+    @AfterEach
+    void tearDownSecurity() {
+        SecurityContextHolder.clearContext();
+    }
 
     private JsonNode createSampleGraphPayload() {
         ObjectNode root = objectMapper.createObjectNode();
@@ -493,6 +527,9 @@ class ProjectWorkflowPersistencePostgresTest {
         for (int i = 0; i < threadCount; i++) {
             final int index = i;
             executor.submit(() -> {
+                SecurityContextHolder.getContext().setAuthentication(
+                        new UsernamePasswordAuthenticationToken(testUser, null, Collections.emptyList())
+                );
                 readyLatch.countDown();
                 try {
                     startLatch.await();
@@ -506,6 +543,7 @@ class ProjectWorkflowPersistencePostgresTest {
                 } catch (Throwable t) {
                     errors.add(t);
                 } finally {
+                    SecurityContextHolder.clearContext();
                     doneLatch.countDown();
                 }
             });

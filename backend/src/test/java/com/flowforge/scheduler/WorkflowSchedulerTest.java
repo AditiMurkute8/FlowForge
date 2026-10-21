@@ -389,21 +389,22 @@ class WorkflowSchedulerTest {
         for (int i = 0; i < 20; i++) {
             CountDownLatch a1Started = new CountDownLatch(1);
             CountDownLatch bStarted = new CountDownLatch(1);
-            CountDownLatch releaseBoth = new CountDownLatch(1);
+            CountDownLatch a1Finishing = new CountDownLatch(1);
             AtomicBoolean a2Invoked = new AtomicBoolean(false);
 
             TaskRegistry registry = new TaskRegistry()
                 .register("A1", id -> {
                     a1Started.countDown();
-                    if (!releaseBoth.await(5, TimeUnit.SECONDS)) {
-                        throw new TimeoutException("Timed out waiting for releaseBoth in A1");
+                    if (!bStarted.await(5, TimeUnit.SECONDS)) {
+                        throw new TimeoutException("Timed out waiting for B to start in A1");
                     }
+                    a1Finishing.countDown();
                 })
                 .register("A2", id -> a2Invoked.set(true))
                 .register("B", id -> {
                     bStarted.countDown();
-                    if (!releaseBoth.await(5, TimeUnit.SECONDS)) {
-                        throw new TimeoutException("Timed out waiting for releaseBoth in B");
+                    if (!a1Finishing.await(5, TimeUnit.SECONDS)) {
+                        throw new TimeoutException("Timed out waiting for A1 finishing in B");
                     }
                     throw new RuntimeException("Simulated failure in task B");
                 });
@@ -420,9 +421,6 @@ class WorkflowSchedulerTest {
                     assertThat(bStarted.await(5, TimeUnit.SECONDS))
                         .as("Task B must start running on iteration %d", i)
                         .isTrue();
-
-                    // Release both tasks simultaneously to race A1 completion against B failure
-                    releaseBoth.countDown();
 
                     WorkflowExecutionResult result = future.get(5, TimeUnit.SECONDS);
 
