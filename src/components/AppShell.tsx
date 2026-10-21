@@ -39,12 +39,12 @@ export const AppShell: React.FC<AppShellProps> = ({
 }) => {
   return (
     <div className="h-full min-h-0 flex flex-col bg-[var(--bg-canvas)] text-[var(--text-primary)]">
-      {/* Simulation Boundary Banner */}
+      {/* Single-Node Architecture Notice Banner */}
       <div className="w-full bg-[var(--bg-surface)] border-b border-[var(--border-default)] px-4 py-1.5 flex items-center justify-between text-[11px] text-[var(--text-secondary)]">
         <div className="flex items-center gap-2 mx-auto">
           <AlertCircle size={13} className="text-[var(--status-yellow-text)] shrink-0" />
           <span>
-            <strong className="text-[var(--text-primary)] font-medium">Phase 0 Architecture Boundary:</strong> Simulated pipeline telemetry active. Backend scheduler, database, and workers offline.
+            <strong className="text-[var(--text-primary)] font-medium">Phase 1 Single-Node Engine:</strong> In-process scheduler and PostgreSQL persistence. Distributed workers are planned for Phase 2.
           </span>
         </div>
       </div>
