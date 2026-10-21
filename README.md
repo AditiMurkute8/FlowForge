@@ -21,7 +21,7 @@ FlowForge is currently at the conclusion of **Phase 1: Single-Node Core Engine**
 | Interactive React 19 visual workflow builder with dual Light/Dark themes | Multi-scheduler leader election and cloud-native clustering (Phase 7) |
 
 > [!NOTE]
-> FlowForge is currently an active engineering prototype and is **not yet production-ready**. All task execution currently runs within the single-node Spring Boot server process.
+> FlowForge is currently an active engineering prototype and is **not production-ready**. All task execution currently runs in-process within a single Spring Boot JVM instance. Distributed execution, worker fleets, exactly-once delivery, and out-of-process fault recovery are not yet implemented.
 
 ---
 
@@ -30,27 +30,29 @@ FlowForge is currently at the conclusion of **Phase 1: Single-Node Core Engine**
 ### 1. Workflow DAG Modeling & Dependency Validation
 - **Directed Dependency Semantics:** Explicit `prerequisite -> dependent` edge semantics (`source -> target`). A dependent task is guaranteed not to run until all upstream prerequisites complete successfully.
 - **Deep Cycle Detection:** Iterative 3-color Depth-First Search (`WHITE`, `GRAY`, `BLACK`) in [`DagEngine`](backend/src/main/java/com/flowforge/core/DagEngine.java) that detects self-loops and complex cycles with full stack safety, reporting precise cycle paths.
-- **Deterministic Topological Sort:** Implementation of Kahn's algorithm with lexicographical priority queue tie-breaking, ensuring deterministic task scheduling order across executions.
+- **Deterministic Topological Sort:** Kahn's algorithm with lexicographical priority queue tie-breaking, ensuring deterministic task scheduling order across executions.
 - **Structural Integrity Checks:** Rejects duplicate task identifiers, duplicate edges, and references to undeclared tasks; automatically flags disconnected/isolated task nodes.
+- **Preflight Capacity Boundaries:** The validation API strictly enforces limits of up to **50 tasks** and **100 edges** per graph submission, returning HTTP 400 for oversized requests.
 
 ### 2. Single-Node In-Process Task Scheduler
-- **Parallel Branch Execution:** Dynamically evaluates task readiness as upstream tasks finish, executing independent branches concurrently across a managed Java thread pool.
-- **Bounded Capacity:** Hard admission control via server-level `Semaphore` permits (`flowforge.scheduler.max-concurrent-workflows`), quarantining permits if scheduler shutdown cannot be positively verified.
-- **Timeout Enforcement:** Synchronous execution timeout (`CompletableFuture.orTimeout`) yielding clean HTTP `504 Gateway Timeout` responses when workflows exceed configured deadlines (`flowforge.scheduler.execution-timeout-seconds`).
-- **Resilient Retry Policies:** Configurable max attempts, fixed backoff, and exponential backoff with full jitter to prevent thundering herd effects.
+- **Parallel Branch Execution:** Dynamically evaluates task readiness as upstream prerequisites complete, executing independent branches concurrently across a managed Java thread pool.
+- **Bounded Capacity:** Hard admission control via server-level `Semaphore` permits (`flowforge.scheduler.max-concurrent-workflows`, default 4), quarantining permits if scheduler shutdown cannot be positively verified.
+- **Timeout Enforcement:** Synchronous execution timeout (`CompletableFuture.orTimeout`) yielding clean HTTP `504 Gateway Timeout` responses when workflows exceed configured deadlines (`flowforge.scheduler.execution-timeout-seconds`, default 15s).
+- **Resilient Retry Policies:** Configurable max attempts (up to 5), fixed backoff, and exponential backoff with full jitter to prevent thundering herd effects.
 - **Task Lifecycle Tracking:** Strict task state transitions: `PENDING` &rarr; `RUNNING` &rarr; `COMPLETED`, `FAILED`, or `CANCELLED`.
+- **In-Process Simulated Actions:** Tasks in Phase 1 execute as in-process actions (`NO_OP` lambda, `DELAY` sleep, or simulated failure exceptions). Short execution durations (e.g., 9ms–15ms) indicate in-memory thread execution and persistence, **not** external worker invocation.
 
 ### 3. Transactional Persistence & Audit Trail
-- **PostgreSQL Source of Truth:** Foreign-key referential integrity with strict delete constraints (`ON DELETE RESTRICT` for workflows and runs).
+- **PostgreSQL Source of Truth:** Foreign-key referential integrity with strict delete constraints (`ON DELETE RESTRICT` for workflows and runs; `ON DELETE CASCADE` for memberships on project deletion).
 - **Immutable Workflow Versions:** Database triggers (`enforce_workflow_version_immutability` and `enforce_workflow_version_no_delete`) block in-place `UPDATE` and `DELETE` operations on historical workflow version snapshots.
 - **Durable Run History:** Persisted workflow runs and granular task runs storing attempt counts, start/end timestamps, duration in milliseconds, and sanitized error outputs.
 - **Flyway Migrations:** Repeatable, version-controlled schema evolution under [`backend/src/main/resources/db/migration/`](backend/src/main/resources/db/migration/).
 
 ### 4. Authentication & Role-Based Access Control (RBAC)
-- **Stateless JWT Security:** Authentication via standard `Authorization: Bearer <token>` headers signed with HMAC-SHA256.
+- **Stateless JWT Security:** Authentication via standard `Authorization: Bearer <token>` headers signed with HMAC-SHA256 (requires minimum 256-bit secret).
 - **Password Protection:** BCrypt password hashing for user credential storage.
 - **Project-Level Authorization:** Fine-grained roles assigned per project:
-  - **`ADMIN`:** Full control (manage members, delete projects/workflows, create workflows, trigger runs). Pessimistic locking prevents demoting or removing the last project administrator.
+  - **`ADMIN`:** Full project control (manage members, delete projects/workflows, create workflows, trigger runs). Pessimistic locking prevents demoting or removing the last project administrator.
   - **`DEVELOPER`:** Operational control (create and edit workflows, create versions, trigger runs).
   - **`VIEWER`:** Read-only access (inspect project workflows, versions, and execution histories).
 
@@ -73,13 +75,13 @@ FlowForge is currently at the conclusion of **Phase 1: Single-Node Core Engine**
 - **Linter:** [Oxlint](https://oxc.rs/) (`^0.15.12`)
 
 ### Backend
-- **Language / Runtime:** Java 17 or 22
+- **Language / Runtime:** **Java 22** (Eclipse Temurin 22 verified in CI and Maven wrapper; `backend/pom.xml` specifies `<java.version>17</java.version>` bytecode baseline)
 - **Framework:** [Spring Boot 3.4.3](https://spring.io/projects/spring-boot)
   - `spring-boot-starter-web` (REST APIs)
   - `spring-boot-starter-security` (Stateless JWT Security)
   - `spring-boot-starter-data-jpa` (Hibernate 6 persistence)
   - `spring-boot-starter-validation` (Bean validation constraints)
-  - `spring-boot-starter-actuator` (Health and telemetry endpoints)
+  - `spring-boot-starter-actuator` (Health and info telemetry endpoints)
 - **Security & Tokens:** JJWT (`io.jsonwebtoken:jjwt-api:0.12.6`)
 - **Build Tool:** Apache Maven 3.9.9 via Maven Wrapper (`mvnw` / `mvnw.cmd`)
 
@@ -91,7 +93,7 @@ FlowForge is currently at the conclusion of **Phase 1: Single-Node Core Engine**
 ### Testing & Infrastructure
 - **Unit & Slice Testing:** JUnit 5, Mockito, AssertJ, Spring Security Test
 - **PostgreSQL Integration Tests:** [Testcontainers](https://testcontainers.com/) (`1.20.4`) running authoritative PostgreSQL containers during automated tests
-- **Continuous Integration:** GitHub Actions runner (`ubuntu-latest`)
+- **Continuous Integration:** GitHub Actions runner (`ubuntu-latest` with JDK 22 and Node.js 20)
 
 ---
 
@@ -187,17 +189,32 @@ FlowForge/
 
 Before running FlowForge locally, ensure you have the following installed:
 
-1. **Java Development Kit (JDK):** Version 17 or 22.
+1. **Java Development Kit (JDK):** **JDK 22** is recommended (matching GitHub Actions CI and the Eclipse Temurin build environment).
 2. **Node.js & npm:** Node.js v20+ (tested on Node.js v22) with npm v10+.
-3. **PostgreSQL Database:** PostgreSQL 16+ running locally or in Docker.
-4. **Docker:** Required if running PostgreSQL via a container, and **required** if running the backend PostgreSQL integration test suite via Testcontainers.
+3. **PostgreSQL Database:** PostgreSQL 16+ running as a local service or in Docker.
+4. **Docker:**
+   - **Optional** for running the application if you already have a local PostgreSQL service.
+   - **Required** if running the PostgreSQL integration test suite (`mvn test`) via Testcontainers.
 
 ---
 
 ## Getting Started
 
 ### 1. Database Setup
-Start a local PostgreSQL instance or launch one using Docker:
+
+You can use an existing local PostgreSQL installation or start a throwaway container using Docker.
+
+#### Option A: Using an Existing Local PostgreSQL Instance (No Docker Required)
+If you already have PostgreSQL installed and running on your machine:
+
+1. Connect to your database server and create an empty database named `flowforge`:
+   ```sql
+   CREATE DATABASE flowforge;
+   ```
+2. Note your database credentials (username and password). You will pass them to the backend via environment variables.
+
+#### Option B: Using Docker (Local Development Container)
+If you prefer running PostgreSQL via Docker, launch a container with local-development credentials:
 
 ```bash
 docker run -d \
@@ -209,32 +226,52 @@ docker run -d \
   postgres:16-alpine
 ```
 
-### 2. Backend Configuration and Startup
-The backend requires a 256-bit (minimum 32-character) secret key for JWT signing. Configure this via the `FLOWFORGE_JWT_SECRET` environment variable.
+> [!WARNING]
+> The credentials `postgres` / `postgres` shown above are **local-development placeholders only**. Never use default or hardcoded credentials in shared or production environments.
 
-#### On Linux / macOS:
+### 2. Backend Configuration and Startup
+
+The backend requires a secure 256-bit (minimum 32-character) secret key for JWT signing. If `FLOWFORGE_JWT_SECRET` is missing or shorter than 32 characters, application startup will halt with an `IllegalStateException`.
+
+#### Generating a Random Secret for Local Development
+- **PowerShell (Windows):**
+  ```powershell
+  $bytes = [byte[]]::new(32); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); [Convert]::ToHexString($bytes)
+  ```
+- **Bash / zsh (Linux/macOS):**
+  ```bash
+  openssl rand -hex 32
+  ```
+
+#### Launching the Backend
+
+##### On Linux / macOS:
 ```bash
 cd backend
-export FLOWFORGE_JWT_SECRET="replace-with-a-secure-secret-key-at-least-32-chars-long"
+
+# Configure environment variables (replace placeholders with your actual local configuration)
+export FLOWFORGE_JWT_SECRET="<YOUR_32_PLUS_CHARACTER_RANDOM_SECRET>"
 export SPRING_DATASOURCE_URL="jdbc:postgresql://localhost:5432/flowforge"
 export SPRING_DATASOURCE_USERNAME="postgres"
-export SPRING_DATASOURCE_PASSWORD="postgres"
+export SPRING_DATASOURCE_PASSWORD="<YOUR_LOCAL_DB_PASSWORD>"
 
 ./mvnw spring-boot:run
 ```
 
-#### On Windows (PowerShell):
+##### On Windows (PowerShell):
 ```powershell
 cd backend
-$env:FLOWFORGE_JWT_SECRET = "replace-with-a-secure-secret-key-at-least-32-chars-long"
+
+# Configure environment variables (replace placeholders with your actual local configuration)
+$env:FLOWFORGE_JWT_SECRET = "<YOUR_32_PLUS_CHARACTER_RANDOM_SECRET>"
 $env:SPRING_DATASOURCE_URL = "jdbc:postgresql://localhost:5432/flowforge"
 $env:SPRING_DATASOURCE_USERNAME = "postgres"
-$env:SPRING_DATASOURCE_PASSWORD = "postgres"
+$env:SPRING_DATASOURCE_PASSWORD = "<YOUR_LOCAL_DB_PASSWORD>"
 
 .\mvnw.cmd spring-boot:run
 ```
 
-Upon startup, Flyway will automatically execute migrations `V1` through `V4`, initializing all tables and constraints. The backend API will be available at `http://localhost:8080`.
+Upon startup, Flyway automatically executes migrations `V1` through `V4`, creating all necessary tables and triggers. The backend API will be available at `http://localhost:8080`.
 
 ### 3. Frontend Installation and Startup
 From the repository root:
@@ -247,21 +284,21 @@ npm install
 npm run dev
 ```
 
-The frontend will start at `http://localhost:5173/`. Open this URL in your browser to access the FlowForge workspace.
+The frontend will start at `http://localhost:5173/`. Open this URL in your browser to access FlowForge.
 
 ---
 
 ## Configuration
 
-All configuration values can be adjusted via environment variables or Spring application properties.
+All configuration settings are managed through environment variables or Spring application properties.
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `FLOWFORGE_JWT_SECRET` | *(None / Required)* | HMAC-SHA256 signing key for JWT tokens. **Must be at least 32 characters (256 bits)**. |
+| `FLOWFORGE_JWT_SECRET` | *(None / Required)* | HMAC-SHA256 signing key. **Must be at least 32 characters (256 bits)**. |
 | `FLOWFORGE_JWT_EXPIRATION_MS` | `86400000` | JWT token validity window in milliseconds (default: 24 hours). |
 | `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/flowforge` | JDBC connection URL for PostgreSQL. |
-| `SPRING_DATASOURCE_USERNAME` | `postgres` | Database username. |
-| `SPRING_DATASOURCE_PASSWORD` | `postgres` | Database password. |
+| `SPRING_DATASOURCE_USERNAME` | `postgres` | Database username (placeholder; configure appropriately). |
+| `SPRING_DATASOURCE_PASSWORD` | `postgres` | Database password (placeholder; configure appropriately). |
 | `SPRING_FLYWAY_ENABLED` | `true` | Enables or disables automated Flyway database schema migrations. |
 | `VITE_API_BASE_URL` | `http://localhost:8080` | Frontend target URL for backend REST API calls. |
 | `flowforge.scheduler.max-concurrent-workflows` | `4` | Maximum concurrent workflows admitted by the server semaphore. |
@@ -269,6 +306,38 @@ All configuration values can be adjusted via environment variables or Spring app
 
 > [!CAUTION]
 > Never commit actual passwords, tokens, or private secrets to version control. Keep `.env` files untracked.
+
+---
+
+## Troubleshooting
+
+### Port Conflicts
+- **Port 5432 (PostgreSQL):** If port 5432 is already bound by another service or existing container:
+  - You can run the Docker container on an alternate host port: `-p 5433:5432`.
+  - Update your connection URL accordingly: `SPRING_DATASOURCE_URL="jdbc:postgresql://localhost:5433/flowforge"`.
+  - Do **not** remove or reset existing databases or volumes to resolve port conflicts.
+- **Port 8080 (Spring Boot):** If port 8080 is in use, pass `SERVER_PORT=8081` (or `$env:SERVER_PORT="8081"`) and update frontend `VITE_API_BASE_URL="http://localhost:8081"`.
+- **Container Name Conflict:** If a container named `flowforge-postgres` already exists, start it with `docker start flowforge-postgres` or choose a distinct name (e.g. `--name flowforge-dev-db`).
+
+### Missing or Short JWT Secret
+If the backend terminates during startup with:
+```
+IllegalStateException: Configured JWT secret is invalid or missing. A secure secret with a minimum length of 32 characters (256 bits) must be provided via FLOWFORGE_JWT_SECRET.
+```
+Ensure you have set the `FLOWFORGE_JWT_SECRET` environment variable in the active terminal session to a string of at least 32 characters before running `./mvnw spring-boot:run`.
+
+### Database Connectivity and Migrations
+- Ensure PostgreSQL is running and accepting connections before launching Spring Boot.
+- Verify that the target database exists (`flowforge`). Flyway manages tables within an existing database, but does not create the database itself.
+- Inspect container status safely using `docker ps` and container logs via `docker logs <container-name>`.
+
+### Docker and Integration Tests
+Running `./mvnw test` triggers Testcontainers integration tests that dynamically launch a temporary PostgreSQL container.
+- If Docker is not running or accessible, integration tests will fail.
+- To run only pure unit tests without requiring Docker, specify:
+  ```bash
+  ./mvnw test -Dtest="*Test,!*PostgresTest"
+  ```
 
 ---
 
@@ -280,7 +349,7 @@ All configuration values can be adjusted via environment variables or Spring app
 | :--- | :--- | :--- |
 | `POST` | `/api/v1/auth/register` | Register a new user account with email, password, and full name. |
 | `POST` | `/api/v1/auth/login` | Authenticate user credentials and receive a JWT Bearer token. |
-| `POST` | `/api/v1/dag/validate` | Lightweight DAG structure validation, cycle detection, and topological sorting (bounded to 50 nodes). |
+| `POST` | `/api/v1/dag/validate` | Lightweight DAG structure validation, cycle detection, and topological sorting (strictly bounded to max 50 nodes and 100 edges). |
 | `GET` | `/actuator/health` | Spring Boot Actuator application health indicator. |
 | `GET` | `/actuator/info` | Application metadata and build details. |
 
@@ -291,32 +360,30 @@ All configuration values can be adjusted via environment variables or Spring app
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/auth/me` | Authenticated | Retrieve profile details of the currently authenticated user. |
 | `POST` | `/api/v1/projects` | Authenticated | Create a new project. The creator is automatically assigned the `ADMIN` role. |
-| `GET` | `/api/v1/projects` | Authenticated | List all accessible projects with pagination. |
+| `GET` | `/api/v1/projects` | Authenticated | List all accessible projects with pagination (`page`, `size`, default 20). |
 | `GET` | `/api/v1/projects/{projectId}` | `VIEWER` | Retrieve project details by UUID. |
 | `GET` | `/api/v1/projects/slug/{slug}` | `VIEWER` | Retrieve project details by URL-friendly slug. |
 | `DELETE` | `/api/v1/projects/{projectId}` | `ADMIN` | Delete a project and its memberships. |
 | `GET` | `/api/v1/projects/{projectId}/members` | `VIEWER` | List members and their assigned roles for a project. |
 | `POST` | `/api/v1/projects/{projectId}/members` | `ADMIN` | Add or update a project member's role (`ADMIN`, `DEVELOPER`, `VIEWER`). |
-| `DELETE` | `/api/v1/projects/{projectId}/members/{userId}` | `ADMIN` | Remove a member from a project (guarded against removing the last admin). |
+| `DELETE` | `/api/v1/projects/{projectId}/members/{userId}` | `ADMIN` | Remove a member from a project (pessimistic lock prevents removing the last admin). |
 | `POST` | `/api/v1/projects/{projectId}/workflows` | `DEVELOPER` | Create a new workflow definition inside a project. |
 | `GET` | `/api/v1/projects/{projectId}/workflows` | `VIEWER` | List workflows belonging to a project with pagination. |
 | `GET` | `/api/v1/workflows/{workflowId}` | `VIEWER` | Retrieve workflow details by UUID. |
 | `DELETE` | `/api/v1/workflows/{workflowId}` | `ADMIN` | Delete a workflow. |
 | `POST` | `/api/v1/workflows/{workflowId}/versions` | `DEVELOPER` | Create an immutable workflow version snapshot containing DAG structure and task configs. |
-| `GET` | `/api/v1/workflows/{workflowId}/versions` | `VIEWER` | List all historical versions for a workflow. |
+| `GET` | `/api/v1/workflows/{workflowId}/versions` | `VIEWER` | List all historical versions for a workflow with pagination. |
 | `GET` | `/api/v1/workflows/{workflowId}/versions/latest` | `VIEWER` | Retrieve the latest version snapshot for a workflow. |
 | `GET` | `/api/v1/workflows/{workflowId}/versions/{versionNumber}` | `VIEWER` | Retrieve a specific historical version snapshot. |
-| `POST` | `/api/v1/workflows/{workflowId}/runs` | `DEVELOPER` | Execute a workflow version synchronously with durable run and task persistence. |
-| `GET` | `/api/v1/workflows/{workflowId}/runs` | `VIEWER` | List durable workflow execution history with pagination. |
+| `POST` | `/api/v1/workflows/{workflowId}/runs` | `DEVELOPER` | **Durable Execution:** Execute a workflow version synchronously within bounded concurrency, persisting the run and task records to PostgreSQL. |
+| `GET` | `/api/v1/workflows/{workflowId}/runs` | `VIEWER` | List durable workflow execution history with pagination (max page size 100). |
 | `GET` | `/api/v1/runs/{runId}` | `VIEWER` | Retrieve detailed status of a specific workflow run, including executed task runs. |
 | `GET` | `/api/v1/runs/{runId}/tasks` | `VIEWER` | List individual task execution records for a run. |
-| `POST` | `/api/v1/workflows/execute` | Authenticated | **Transient Execution:** Submit and execute a workflow graph synchronously without persisting run history to the database. |
+| `POST` | `/api/v1/workflows/execute` | Authenticated | **Transient Execution:** Submit and execute a workflow graph synchronously in-memory within bounded concurrency without persisting run history to PostgreSQL. |
 
 ---
 
 ## Testing
-
-FlowForge maintains comprehensive test suites across both the frontend and backend.
 
 ### Frontend Tests
 Execute frontend checks from the root directory:
@@ -335,13 +402,13 @@ npm run lint
 npm run build
 ```
 
-*Recent verification:* 16 test files (389 tests) pass with 0 errors, 0 type issues, and 0 lint warnings.
+*Verified baseline (October 2026):* 16 test files (389 tests) pass with 0 errors, 0 type issues, and 0 lint warnings on the Phase 1 feature branch. Past local results reflect the baseline and do not guarantee future branch changes pass without executing the suite.
 
 ### Backend Tests
 Execute backend tests from the `backend/` directory:
 
 ```bash
-# Unix
+# Linux / macOS
 ./mvnw test
 
 # Windows (PowerShell)
@@ -353,7 +420,7 @@ Integration tests verifying database behavior—including `FlywayMigrationPostgr
 - **Requirement:** A running Docker daemon is required to execute these integration tests.
 - When running in environments without Docker, unit tests that do not depend on Testcontainers use an embedded H2 database or mock repository layers.
 
-*Recent verification:* 379 tests executed across 39 backend test classes with 0 failures and 0 errors. Note that past results reflect the verified baseline state and do not guarantee future branch changes pass without running the suite.
+*Verified baseline (October 2026):* 379 tests executed across 39 backend test classes with 0 failures and 0 errors on the Phase 1 feature branch.
 
 ---
 
@@ -369,6 +436,8 @@ Continuous Integration is automated via GitHub Actions in [`.github/workflows/ba
 2. **`frontend-check` Job:**
    - Environment: Ubuntu latest with Node.js 20.
    - Executes `npm ci`, `npm test` (Vitest), `npm run typecheck` (`tsc --noEmit`), `npm run lint` (`oxlint`), and `npm run build` (`vite build`).
+
+*Note: GitHub Actions badge status reflects the latest workflow execution on GitHub. Inspect the [Actions tab](https://github.com/AditiMurkute8/FlowForge/actions) for real-time status.*
 
 ---
 
@@ -405,11 +474,11 @@ The overall development roadmap for FlowForge spans eight milestones as document
 
 ## Known Limitations
 
-- **Single-Node Execution Model:** All workflow task executions run in-memory within the Spring Boot process. If the backend process crashes or restarts, active workflow executions will be abruptly terminated.
-- **No Distributed Worker Fleet:** Worker process isolation, remote heartbeats, and out-of-process task dispatch are not yet built (scheduled for Phase 2).
+- **Single-Node Execution Model:** All workflow task executions run in-memory within the Spring Boot process. If the backend process crashes or restarts, active workflow executions will terminate.
+- **In-Process Task Simulation:** Tasks execute as in-process actions (`NO_OP`, `DELAY`, `FAIL`, `FAIL_UNTIL_ATTEMPT`). Out-of-process worker fleets and distributed executions are not yet implemented (scheduled for Phase 2).
 - **Synchronous Execution Latency:** Workflow runs submitted via REST endpoints execute synchronously on the server and block the HTTP connection until completion or timeout (governed by `flowforge.scheduler.execution-timeout-seconds`, default 15s).
 - **Transient vs. Durable Endpoints:** The `/api/v1/workflows/execute` endpoint executes graphs in-memory and does not record history in PostgreSQL. For durable audit history, use the versioned `/api/v1/workflows/{workflowId}/runs` API.
-- **Pending End-to-End UI Audit:** While all automated unit, integration, and build checks are passing, a full end-to-end visual and browser-interaction audit remains pending prior to Phase 2 kickoff.
+- **Pending End-to-End UI Audit & Header Banner:** The UI currently displays a static header banner in [src/components/AppShell.tsx](src/components/AppShell.tsx) referencing a Phase 0 architecture boundary ("Simulated pipeline telemetry active. Backend scheduler, database, and workers offline."). Source inspection confirms this banner is unconditioned static JSX from the initial prototype shell; the backend scheduler and PostgreSQL database are online, but aggregate dashboard metrics (`MOCK_STATS`) and sample templates are simulated. A full end-to-end visual and browser-interaction audit remains pending prior to Phase 2 kickoff.
 
 ---
 
