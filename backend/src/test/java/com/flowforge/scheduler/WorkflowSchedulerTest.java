@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -385,33 +386,45 @@ class WorkflowSchedulerTest {
             List.of(new DependencyEdge("A1", "A2"))
         );
 
-        // Run multiple iterations to exercise different thread scheduling interleavings
+        // Run multiple iterations to exercise thread scheduling interleavings
         for (int i = 0; i < 20; i++) {
             CountDownLatch a1Started = new CountDownLatch(1);
             CountDownLatch bStarted = new CountDownLatch(1);
-            CountDownLatch releaseBoth = new CountDownLatch(1);
+            CountDownLatch bFailed = new CountDownLatch(1);
             AtomicBoolean a2Invoked = new AtomicBoolean(false);
 
             TaskRegistry registry = new TaskRegistry()
                 .register("A1", id -> {
                     a1Started.countDown();
-                    if (!releaseBoth.await(5, TimeUnit.SECONDS)) {
-                        throw new TimeoutException("Timed out waiting for releaseBoth in A1");
+                    if (!bStarted.await(5, TimeUnit.SECONDS)) {
+                        throw new TimeoutException("Timed out waiting for B to start in A1");
+                    }
+                    if (!bFailed.await(5, TimeUnit.SECONDS)) {
+                        throw new TimeoutException("Timed out waiting for B to fail in A1");
                     }
                 })
                 .register("A2", id -> a2Invoked.set(true))
                 .register("B", id -> {
                     bStarted.countDown();
-                    if (!releaseBoth.await(5, TimeUnit.SECONDS)) {
-                        throw new TimeoutException("Timed out waiting for releaseBoth in B");
+                    if (!a1Started.await(5, TimeUnit.SECONDS)) {
+                        throw new TimeoutException("Timed out waiting for A1 to start in B");
                     }
                     throw new RuntimeException("Simulated failure in task B");
                 });
 
+            TaskExecutionListener listener = new TaskExecutionListener() {
+                @Override
+                public void onTaskFailed(String taskId, int attemptCount, Instant startedAt, Instant completedAt, Long durationMs, Throwable error) {
+                    if ("B".equals(taskId)) {
+                        bFailed.countDown();
+                    }
+                }
+            };
+
             try (WorkflowScheduler scheduler = new WorkflowScheduler(4)) {
                 ExecutorService testExecutor = Executors.newSingleThreadExecutor();
                 try {
-                    Future<WorkflowExecutionResult> future = testExecutor.submit(() -> scheduler.execute(graph, registry));
+                    Future<WorkflowExecutionResult> future = testExecutor.submit(() -> scheduler.execute(graph, registry, listener));
 
                     // Deterministically wait until both root tasks A1 and B are actively running concurrently
                     assertThat(a1Started.await(5, TimeUnit.SECONDS))
@@ -420,9 +433,6 @@ class WorkflowSchedulerTest {
                     assertThat(bStarted.await(5, TimeUnit.SECONDS))
                         .as("Task B must start running on iteration %d", i)
                         .isTrue();
-
-                    // Release both tasks simultaneously to race A1 completion against B failure
-                    releaseBoth.countDown();
 
                     WorkflowExecutionResult result = future.get(5, TimeUnit.SECONDS);
 

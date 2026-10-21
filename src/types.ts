@@ -124,7 +124,7 @@ export interface ExecuteWorkflowRequest {
   concurrency?: number;
 }
 
-export type WorkflowRunState = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type WorkflowRunState = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 export type BackendTaskState = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
@@ -153,4 +153,183 @@ export interface ApiErrorResponse {
   message: string;
   timestamp: string;
   details: string[];
+}
+
+// --- Persistence REST API DTOs (Phase 1.2 Step 2) ---
+
+export interface PageResponse<T> {
+  content: T[];
+  totalElements: number;
+  totalPages: number;
+  size: number;
+  number: number;
+}
+
+export interface CreateProjectRequest {
+  name: string;
+  slug?: string;
+  description?: string;
+}
+
+export interface ProjectResponseDto {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorkflowRequest {
+  name: string;
+  slug?: string;
+  description?: string;
+}
+
+export interface WorkflowResponseDto {
+  id: string;
+  projectId: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorkflowVersionRequest {
+  versionTag?: string;
+  description?: string;
+  graphPayload: Record<string, unknown>;
+}
+
+export interface WorkflowVersionResponseDto {
+  id: string;
+  workflowId: string;
+  versionNumber: number;
+  versionTag: string;
+  description: string | null;
+  graphPayload: {
+    nodes?: unknown[];
+    edges?: unknown[];
+    [key: string]: unknown;
+  };
+  taskCount: number;
+  edgeCount: number;
+  isValidDag: boolean;
+  createdAt: string;
+}
+
+export interface WorkflowVersionSummaryResponseDto {
+  id: string;
+  workflowId: string;
+  versionNumber: number;
+  versionTag: string;
+  description: string | null;
+  taskCount: number;
+  edgeCount: number;
+  isValidDag: boolean;
+  createdAt: string;
+}
+
+// --- Durable Workflow Run REST API DTOs (Phase 1.3 / Phase 1.4) ---
+
+export interface ExecuteRunRequest {
+  versionNumber?: number;
+  triggeredBy?: string;
+  concurrency?: number;
+}
+
+export type TaskRunStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+
+export interface TaskRunResponseDto {
+  id: string;
+  taskId: string;
+  status: TaskRunStatus;
+  attemptCount: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface WorkflowRunResponseDto {
+  id: string;
+  workflowId: string;
+  workflowVersionId: string;
+  versionNumber: number;
+  status: WorkflowRunState;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  triggeredBy: string | null;
+  createdAt: string;
+  tasks: TaskRunResponseDto[];
+}
+
+export interface WorkflowRunSummaryResponseDto {
+  id: string;
+  workflowId: string;
+  workflowVersionId: string;
+  versionNumber: number;
+  status: WorkflowRunState;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  triggeredBy: string | null;
+  createdAt: string;
+  taskCount: number;
+}
+
+// --- Authentication & User REST API DTOs (Phase 1.5.4) ---
+
+export interface RegisterRequest {
+  email: string;
+  password: string;
+  fullName: string;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface UserResponseDto {
+  id: string;
+  email: string;
+  fullName: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type UserResponse = UserResponseDto;
+
+export interface AuthResponseDto {
+  token: string;
+  user: UserResponseDto;
+}
+
+export type AuthResponse = AuthResponseDto;
+
+// --- Role-Based Access Control (RBAC) & Membership DTOs (Phase 1.5.5) ---
+
+export type ProjectRole = 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+
+export interface ProjectMemberResponseDto {
+  id: string;
+  projectId: string;
+  userId: string;
+  email: string;
+  fullName: string;
+  role: ProjectRole;
+  createdAt: string;
+}
+
+export type ProjectMemberResponse = ProjectMemberResponseDto;
+
+export interface AddProjectMemberRequest {
+  userId?: string;
+  email?: string;
+  role: ProjectRole;
 }

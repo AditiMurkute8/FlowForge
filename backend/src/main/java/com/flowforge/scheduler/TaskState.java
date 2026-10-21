@@ -27,5 +27,12 @@ public enum TaskState {
     /**
      * Task was cancelled before running (due to prerequisite failure or workflow-level fail-fast).
      */
-    CANCELLED
+    CANCELLED;
+
+    /**
+     * Returns true if the task state is terminal (COMPLETED, FAILED, or CANCELLED).
+     */
+    public boolean isTerminal() {
+        return this == COMPLETED || this == FAILED || this == CANCELLED;
+    }
 }

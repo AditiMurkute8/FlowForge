@@ -6,7 +6,9 @@ import { Toast, type ToastMessage } from './components/ui/Toast';
 import { Modal } from './components/ui/Modal';
 import { Input } from './components/ui/Input';
 import { MOCK_PROJECTS, MOCK_WORKFLOWS } from './mockData';
-import { Search, FolderKanban, GitFork } from 'lucide-react';
+import { Search, FolderKanban, GitFork, Loader2 } from 'lucide-react';
+import { useAuth } from './context/AuthContext';
+import { AuthModal, type AuthMode } from './components/auth/AuthModal';
 
 function isEditableElement(event: KeyboardEvent): boolean {
   const target = event.target as HTMLElement | null;
@@ -16,10 +18,25 @@ function isEditableElement(event: KeyboardEvent): boolean {
 }
 
 export const App: React.FC = () => {
+  const { user, isAuthenticated, isInitializing, logout, onSessionExpired } = useAuth();
   const [currentTab, setCurrentTab] = useState<'projects' | 'builder'>('projects');
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<AuthMode>('login');
+
+  // Handle session expiration (e.g. 401 received on protected API)
+  useEffect(() => {
+    if (!onSessionExpired) return;
+    const unsubscribe = onSessionExpired(() => {
+      showToast('Session Expired', 'Your session has expired. Please sign in again.', 'warning');
+      setAuthModalMode('login');
+      setIsAuthModalOpen(true);
+    });
+    return unsubscribe;
+  }, [onSessionExpired]);
 
   // Dual-theme state with persistent storage and system preference fallback
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -87,28 +104,67 @@ export const App: React.FC = () => {
       onOpenSearch={() => setIsSearchOpen(true)}
       theme={theme}
       onToggleTheme={toggleTheme}
+      user={user}
+      isAuthenticated={isAuthenticated}
+      onOpenAuth={(mode = 'login') => {
+        setAuthModalMode(mode);
+        setIsAuthModalOpen(true);
+      }}
+      onLogout={() => {
+        logout();
+        showToast('Signed Out', 'You have been signed out successfully.', 'info');
+      }}
     >
-      {currentTab === 'projects' ? (
+      {isInitializing ? (
+        <div
+          className="flex-1 flex flex-col items-center justify-center p-12 gap-3"
+          data-testid="auth-initializing-state"
+        >
+          <Loader2 size={28} className="animate-spin text-[var(--accent-blue)]" />
+          <p className="text-xs font-mono text-[var(--text-secondary)]">
+            Initializing FlowForge session...
+          </p>
+        </div>
+      ) : currentTab === 'projects' ? (
         <ProjectsDashboard
-          onOpenWorkflow={() => {
+          onOpenWorkflow={(projectId) => {
+            setSelectedProjectId(projectId);
             setCurrentTab('builder');
-            showToast(
-              'Workflow Loaded',
-              'Opened "Clickstream Ingestion & Deduplication" in DAG Builder.',
-              'success'
-            );
+          }}
+          onShowToast={showToast}
+          isAuthenticated={isAuthenticated}
+          onOpenAuth={(mode = 'login') => {
+            setAuthModalMode(mode);
+            setIsAuthModalOpen(true);
           }}
         />
       ) : (
         <WorkflowBuilder
+          projectId={selectedProjectId || undefined}
           onBackToProjects={() => setCurrentTab('projects')}
           onShowToast={showToast}
           theme={theme}
+          isAuthenticated={isAuthenticated}
+          onOpenAuth={(mode = 'login') => {
+            setAuthModalMode(mode);
+            setIsAuthModalOpen(true);
+          }}
         />
       )}
 
       {/* Global Toast */}
       <Toast toast={toast} onDismiss={() => setToast(null)} />
+
+      {/* Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        initialMode={authModalMode}
+        onSuccess={() => {
+          setIsAuthModalOpen(false);
+          showToast('Success', 'Authentication succeeded.', 'success');
+        }}
+      />
 
       {/* Global Command Palette Modal (Cmd+K) */}
       <Modal

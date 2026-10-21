@@ -1,0 +1,156 @@
+name: Backend CI & PostgreSQL Verification
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  backend-test:
+    name: Backend Tests & PostgreSQL Testcontainers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 22
+        uses: actions/setup-java@v4
+        with:
+          java-version: '22'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run PostgreSQL Integration Tests
+        run: |
+          cd backend
+          mvn test -Dtest="FlywayMigrationPostgresTest,AuthPersistencePostgresTest,WorkflowRunExecutionPostgresTest,WorkflowRunPersistencePostgresTest,ProjectMemberConcurrencyTest,ProjectMemberConcurrencyPostgresTest"
+
+      - name: Verify PostgreSQL Tests Were Executed (Not Skipped)
+        run: |
+          python3 -c '
+          import sys, glob, os, xml.etree.ElementTree as ET
+
+          REQUIRED_TEST_CLASSES = [
+              "FlywayMigrationPostgresTest",
+              "AuthPersistencePostgresTest",
+              "WorkflowRunPersistencePostgresTest",
+              "WorkflowRunExecutionPostgresTest",
+              "ProjectMemberConcurrencyPostgresTest"
+          ]
+
+          reports_dir = "backend/target/surefire-reports"
+          if not os.path.isdir(reports_dir):
+              print(f"FATAL: Reports directory \"{reports_dir}\" not found.", file=sys.stderr)
+              sys.exit(1)
+
+          failed = False
+          print("=" * 60)
+          print("VERIFYING POSTGRESQL TEST EXECUTION (SUREFIRE XML REPORTS)")
+          print("=" * 60)
+
+          for test_class in REQUIRED_TEST_CLASSES:
+              pattern = os.path.join(reports_dir, f"TEST-*{test_class}*.xml")
+              matching_files = glob.glob(pattern)
+              exact_matches = [
+                  f for f in matching_files
+                  if os.path.basename(f).startswith("TEST-") and f.endswith(".xml") and (
+                      f".{test_class}" in os.path.basename(f) or
+                      f"-{test_class}" in os.path.basename(f)
+                  )
+              ]
+
+              if not exact_matches:
+                  print(f"FAIL: No report file found for required test class \"{test_class}\"", file=sys.stderr)
+                  failed = True
+                  continue
+
+              for report_file in exact_matches:
+                  filename = os.path.basename(report_file)
+                  try:
+                      tree = ET.parse(report_file)
+                      root = tree.getroot()
+                  except Exception as e:
+                      print(f"FAIL: Malformed XML in \"{filename}\": {e}", file=sys.stderr)
+                      failed = True
+                      continue
+
+                  if root.tag != "testsuite":
+                      print(f"FAIL: Root element in \"{filename}\" is <{root.tag}>, expected <testsuite>", file=sys.stderr)
+                      failed = True
+                      continue
+
+                  try:
+                      tests = int(root.attrib.get("tests", -1))
+                      failures = int(root.attrib.get("failures", -1))
+                      errors = int(root.attrib.get("errors", -1))
+                      skipped = int(root.attrib.get("skipped", -1))
+                  except (ValueError, TypeError) as e:
+                      print(f"FAIL: Invalid attributes in \"{filename}\": {e}", file=sys.stderr)
+                      failed = True
+                      continue
+
+                  if tests < 0 or failures < 0 or errors < 0 or skipped < 0:
+                      print(f"FAIL: Missing required attributes in \"{filename}\"", file=sys.stderr)
+                      failed = True
+                      continue
+
+                  print(f"VERIFIED: {test_class} [{filename}] -> tests={tests}, failures={failures}, errors={errors}, skipped={skipped}")
+
+                  if tests == 0:
+                      print(f"FAIL: \"{test_class}\" in \"{filename}\" has 0 tests!", file=sys.stderr)
+                      failed = True
+                  if skipped > 0:
+                      print(f"FAIL: \"{test_class}\" in \"{filename}\" has {skipped} skipped test(s)!", file=sys.stderr)
+                      failed = True
+                  if failures > 0:
+                      print(f"FAIL: \"{test_class}\" in \"{filename}\" has {failures} failure(s)!", file=sys.stderr)
+                      failed = True
+                  if errors > 0:
+                      print(f"FAIL: \"{test_class}\" in \"{filename}\" has {errors} error(s)!", file=sys.stderr)
+                      failed = True
+
+          if failed:
+              print("\nFATAL: PostgreSQL Testcontainers tests were skipped, missing, or failed!", file=sys.stderr)
+              sys.exit(1)
+
+          print("\nSUCCESS: All required PostgreSQL Testcontainers tests executed with 0 skips, 0 failures, and 0 errors.")
+          '
+
+      - name: Run Full Backend Test Suite
+        run: |
+          cd backend
+          mvn test
+
+  frontend-check:
+    name: Frontend Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Frontend Tests
+        run: npm test
+
+      - name: TypeScript Typecheck
+        run: npm run typecheck
+
+      - name: Linter
+        run: npm run lint
+
+      - name: Production Build
+        run: npm run build
