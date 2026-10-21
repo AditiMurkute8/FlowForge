@@ -3,6 +3,7 @@ package com.flowforge.core;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -355,5 +356,79 @@ class DagEngineTest {
 
         List<String> order = DagEngine.topologicalSort(taskIds, edges);
         assertThat(order).containsExactly("fetch", "process");
+    }
+
+    @Test
+    @DisplayName("16. 10,000-node deep DAG is stack-safe during validation and topological sorting")
+    void tenThousandNodeDeepDagValidationAndSorting() {
+        int nodeCount = 10_000;
+        List<String> taskIds = new ArrayList<>(nodeCount);
+        List<DependencyEdge> edges = new ArrayList<>(nodeCount - 1);
+
+        for (int i = 0; i < nodeCount; i++) {
+            taskIds.add(String.format("task-%05d", i));
+            if (i > 0) {
+                edges.add(new DependencyEdge(String.format("task-%05d", i - 1), String.format("task-%05d", i)));
+            }
+        }
+
+        TaskGraph graph = TaskGraph.of(taskIds, edges);
+
+        DagValidationResult result = DagEngine.validate(graph);
+        assertThat(result.isValid()).isTrue();
+        assertThat(result.hasCycle()).isFalse();
+        assertThat(result.errors()).isEmpty();
+        assertThat(result.warnings()).isEmpty();
+        assertThat(result.cycleNodes()).isEmpty();
+        assertThat(result.disconnectedNodes()).isEmpty();
+
+        List<String> order = DagEngine.topologicalSort(graph);
+        assertThat(order).hasSize(nodeCount);
+        assertThat(order.get(0)).isEqualTo("task-00000");
+        assertThat(order.get(nodeCount - 1)).isEqualTo(String.format("task-%05d", nodeCount - 1));
+
+        // Deterministic sequence verification across checkpoints
+        for (int i = 0; i < 100; i++) {
+            int sampleIdx = i * 100;
+            assertThat(order.get(sampleIdx)).isEqualTo(String.format("task-%05d", sampleIdx));
+        }
+    }
+
+    @Test
+    @DisplayName("17. Deep cycle traversal is stack-safe and accurately reports cycle path")
+    void deepCycleTraversalIsStackSafeAndReportsCycle() {
+        int nodeCount = 5_000;
+        List<String> taskIds = new ArrayList<>(nodeCount);
+        List<DependencyEdge> edges = new ArrayList<>(nodeCount);
+
+        for (int i = 0; i < nodeCount; i++) {
+            taskIds.add(String.format("deep-%04d", i));
+            if (i > 0) {
+                edges.add(new DependencyEdge(String.format("deep-%04d", i - 1), String.format("deep-%04d", i)));
+            }
+        }
+        // Add back-edge from tail to head to form a 5,000-node deep cycle
+        edges.add(new DependencyEdge(String.format("deep-%04d", nodeCount - 1), "deep-0000"));
+
+        TaskGraph graph = TaskGraph.of(taskIds, edges);
+
+        DagValidationResult result = DagEngine.validate(graph);
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.hasCycle()).isTrue();
+        assertThat(result.cycleNodes()).hasSize(nodeCount);
+        assertThat(result.cycleNodes()).contains("deep-0000", "deep-2500", String.format("deep-%04d", nodeCount - 1));
+        assertThat(result.errors()).anyMatch(err ->
+            err.startsWith("Cyclic dependency: deep-0000 -> ") && err.endsWith(" -> deep-0000")
+        );
+
+        assertThatThrownBy(() -> DagEngine.topologicalSort(graph))
+            .isInstanceOf(InvalidDagException.class)
+            .hasMessageContaining("Cyclic dependency")
+            .satisfies(ex -> {
+                InvalidDagException ide = (InvalidDagException) ex;
+                assertThat(ide.getValidationResult().isValid()).isFalse();
+                assertThat(ide.getValidationResult().hasCycle()).isTrue();
+                assertThat(ide.getValidationResult().cycleNodes()).hasSize(nodeCount);
+            });
     }
 }
