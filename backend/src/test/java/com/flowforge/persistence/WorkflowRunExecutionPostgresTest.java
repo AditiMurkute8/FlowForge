@@ -11,6 +11,7 @@ import com.flowforge.domain.*;
 import com.flowforge.persistence.repository.*;
 import com.flowforge.scheduler.TaskState;
 import com.flowforge.scheduler.WorkflowRunState;
+import com.flowforge.service.ProjectAuthorizationService;
 import com.flowforge.service.WorkflowRunService;
 import com.flowforge.service.exception.ResourceNotFoundException;
 import com.flowforge.service.exception.WorkflowExecutionTimeoutException;
@@ -49,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
-@Import({WorkflowRunService.class, WorkflowExecutionService.class, TaskActionResolver.class, SchedulerProperties.class})
+@Import({WorkflowRunService.class, WorkflowExecutionService.class, TaskActionResolver.class, SchedulerProperties.class, ProjectAuthorizationService.class})
 class WorkflowRunExecutionPostgresTest {
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
