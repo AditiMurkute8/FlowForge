@@ -197,7 +197,9 @@ public class WorkflowExecutionService {
         boolean terminated = false;
         try {
             terminated = (scheduler == null || isSchedulerTerminated(scheduler));
-        } catch (Throwable t) {
+        } catch (Error err) {
+            throw err;
+        } catch (Exception t) {
             log.warn("Exception during scheduler termination check in reclaimPermitWhenTerminated; quarantining permit", t);
             terminated = false;
         }
@@ -211,7 +213,9 @@ public class WorkflowExecutionService {
             boolean termOnShutdown = false;
             try {
                 termOnShutdown = isSchedulerTerminated(scheduler);
-            } catch (Throwable ignored) {
+            } catch (Error err) {
+                throw err;
+            } catch (Exception ignored) {
                 termOnShutdown = false;
             }
             if (termOnShutdown) {
@@ -226,7 +230,15 @@ public class WorkflowExecutionService {
             permitReaperExecutor.submit(() -> runReaperLoop(scheduler, permitHandled, onPermitReleased));
         } catch (RejectedExecutionException e) {
             log.warn("Permit reaper submission rejected; checking termination status", e);
-            if (isSchedulerTerminated(scheduler)) {
+            boolean termOnRejection = false;
+            try {
+                termOnRejection = isSchedulerTerminated(scheduler);
+            } catch (Error err) {
+                throw err;
+            } catch (Exception ignored) {
+                termOnRejection = false;
+            }
+            if (termOnRejection) {
                 releasePermitSafely(permitHandled, onPermitReleased);
             } else if (isShutdown()) {
                 log.warn("Application is shutting down and permit reaper submission was rejected. Worker is still executing; permit remains quarantined until process termination.");
@@ -245,10 +257,26 @@ public class WorkflowExecutionService {
     void runReaperLoop(WorkflowScheduler scheduler, AtomicBoolean permitHandled, Runnable onPermitReleased) {
         long totalWaitedMs = 0;
         while (!permitHandled.get()) {
+            if (isShutdown()) {
+                log.warn("Service shutdown during permit reclamation; permit remains quarantined.");
+                break;
+            }
             long stepMs = getReaperStepTimeoutMs();
             try {
-                boolean terminated = scheduler.awaitTermination(stepMs, TimeUnit.MILLISECONDS);
-                if (terminated || isSchedulerTerminated(scheduler)) {
+                boolean awaited = false;
+                if (scheduler != null) {
+                    awaited = scheduler.awaitTermination(stepMs, TimeUnit.MILLISECONDS);
+                }
+                boolean confirmed = false;
+                try {
+                    confirmed = isSchedulerTerminated(scheduler);
+                } catch (Error err) {
+                    throw err;
+                } catch (Exception termError) {
+                    log.warn("Exception during scheduler termination check in reaper loop; permit remains quarantined", termError);
+                    confirmed = false;
+                }
+                if (confirmed) {
                     releasePermitSafely(permitHandled, onPermitReleased);
                     log.info("Quarantined capacity permit successfully reclaimed after delayed worker termination (waited ~{}ms).", totalWaitedMs);
                     break;
@@ -257,36 +285,54 @@ public class WorkflowExecutionService {
                 if (totalWaitedMs % 30000 < stepMs) {
                     log.warn("Worker still executing after delayed termination check (waited ~{}s); capacity permit remains quarantined.", totalWaitedMs / 1000);
                 }
+                if (scheduler == null || awaited) {
+                    Thread.sleep(Math.min(stepMs, 1000L));
+                }
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                if (isSchedulerTerminated(scheduler)) {
+                boolean confirmed = false;
+                try {
+                    confirmed = isSchedulerTerminated(scheduler);
+                } catch (Error err) {
+                    throw err;
+                } catch (Exception termError) {
+                    confirmed = false;
+                }
+                if (confirmed) {
                     releasePermitSafely(permitHandled, onPermitReleased);
                     log.info("Quarantined capacity permit successfully reclaimed on reaper interruption.");
                     break;
                 }
                 if (isShutdown()) {
                     log.warn("Permit reaper interrupted during service shutdown. Worker remained active; permit remains quarantined.");
+                    Thread.currentThread().interrupt();
                     break;
                 }
                 log.warn("Permit reaper received transient interruption while worker is still alive; continuing reclamation.");
-                Thread.interrupted();
             } catch (Throwable t) {
-                if (t instanceof VirtualMachineError) {
-                    throw (VirtualMachineError) t;
+                if (t instanceof Error err) {
+                    throw err;
                 }
                 log.error("Unexpected error in permit reclamation loop; re-checking termination status", t);
-                if (isSchedulerTerminated(scheduler)) {
+                boolean confirmed = false;
+                try {
+                    confirmed = isSchedulerTerminated(scheduler);
+                } catch (Error err) {
+                    throw err;
+                } catch (Exception termError) {
+                    confirmed = false;
+                }
+                if (confirmed) {
                     releasePermitSafely(permitHandled, onPermitReleased);
                     break;
                 }
                 try {
                     Thread.sleep(Math.min(stepMs, 1000L));
                 } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
                     if (isShutdown()) {
+                        Thread.currentThread().interrupt();
                         break;
                     }
-                    Thread.interrupted();
+                    log.warn("Permit reaper interrupted during error backoff; continuing reclamation.");
                 }
             }
         }
@@ -346,7 +392,9 @@ public class WorkflowExecutionService {
                         boolean canRelease = false;
                         try {
                             canRelease = isSchedulerTerminated(scheduler);
-                        } catch (Throwable termError) {
+                        } catch (Error err) {
+                            throw err;
+                        } catch (Exception termError) {
                             log.error("Exception during scheduler termination check; quarantining permit", termError);
                             canRelease = false;
                         }
