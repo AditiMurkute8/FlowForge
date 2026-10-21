@@ -50,6 +50,8 @@ export interface ProjectsDashboardProps {
   initialRoles?: Record<string, ProjectRole | null>;
 }
 
+const EMPTY_INITIAL_ROLES: Record<string, ProjectRole | null> = {};
+
 export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
   onOpenWorkflow,
   onShowToast,
@@ -60,7 +62,7 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
   isAuthenticated,
   onOpenAuth,
   user: propUser,
-  initialRoles = {},
+  initialRoles = EMPTY_INITIAL_ROLES,
 }) => {
   const authContext = useContext(AuthContext);
   const effectiveIsAuthenticated =
@@ -91,7 +93,16 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
 
   const filterTabs = ['All', 'Production', 'Staging', 'Data Pipeline', 'Security'];
   const activeLoadIdRef = useRef<number>(0);
+  const onOpenAuthRef = useRef(onOpenAuth);
+  useEffect(() => {
+    onOpenAuthRef.current = onOpenAuth;
+  }, [onOpenAuth]);
+  const hasPromptedAuthRef = useRef(false);
+  useEffect(() => {
+    hasPromptedAuthRef.current = false;
+  }, [effectiveIsAuthenticated]);
 
+  const effectiveUserId = effectiveUser?.id;
   const loadProjectRoles = useCallback(
     async (projectList: Project[]) => {
       if (!effectiveIsAuthenticated || projectList.length === 0) return;
@@ -138,8 +149,13 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
         return next;
       });
     },
-    [effectiveIsAuthenticated, fetchProjectMembersFn, effectiveUser, initialRoles]
+    [effectiveIsAuthenticated, fetchProjectMembersFn, effectiveUserId, initialRoles]
   );
+
+  const loadProjectRolesRef = useRef(loadProjectRoles);
+  useEffect(() => {
+    loadProjectRolesRef.current = loadProjectRoles;
+  }, [loadProjectRoles]);
 
   const loadProjects = useCallback(async () => {
     if (!effectiveIsAuthenticated) {
@@ -173,7 +189,8 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
       }));
 
       setProjects(loaded);
-      void loadProjectRoles(loaded);
+      hasPromptedAuthRef.current = false;
+      void loadProjectRolesRef.current(loaded);
     } catch (err) {
       if (currentLoadId !== activeLoadIdRef.current) return;
 
@@ -189,8 +206,9 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
       if (isAuthError) {
         setLoadError('Authentication required to view project inventory. Please sign in.');
         setProjects([]); // Never fall back to mock data on 401
-        if (onOpenAuth) {
-          onOpenAuth('login');
+        if (!hasPromptedAuthRef.current) {
+          hasPromptedAuthRef.current = true;
+          onOpenAuthRef.current?.('login');
         }
       } else if (err instanceof FlowForgeApiError && err.status === 0) {
         // Backend unreachable (offline): graceful fallback with explicit notice
@@ -206,7 +224,7 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
         setIsLoading(false);
       }
     }
-  }, [fetchProjectsFn, effectiveIsAuthenticated, onOpenAuth, loadProjectRoles]);
+  }, [fetchProjectsFn, effectiveIsAuthenticated]);
 
   useEffect(() => {
     void loadProjects();

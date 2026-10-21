@@ -151,6 +151,10 @@ export class AuthSessionManager {
       error: null,
     };
 
+    this.connectTokenGetter();
+  }
+
+  connectTokenGetter(): void {
     if (this.autoConnectTokenGetter) {
       setAuthTokenGetter(() => this.state.token);
       setUnauthorizedHandler((error) => {
@@ -184,6 +188,7 @@ export class AuthSessionManager {
    * On 401, clears the invalid token. On network/server errors, leaves the token stored.
    */
   async initialize(): Promise<void> {
+    this.connectTokenGetter();
     if (this.isInitialized) {
       return;
     }
@@ -427,6 +432,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({
   }
 
   const manager = managerRef.current;
+  manager.connectTokenGetter();
 
   const state = useSyncExternalStore(
     manager.subscribe,
