@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { AppShell } from './components/AppShell';
 import { ProjectsDashboard } from './pages/ProjectsDashboard';
 import { WorkflowBuilder } from './pages/WorkflowBuilder';
@@ -26,6 +26,11 @@ export const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<AuthMode>('login');
+
+  const handleOpenAuth = useCallback((mode: AuthMode = 'login') => {
+    setAuthModalMode(mode);
+    setIsAuthModalOpen(true);
+  }, []);
 
   // Handle session expiration (e.g. 401 received on protected API)
   useEffect(() => {
@@ -106,10 +111,7 @@ export const App: React.FC = () => {
       onToggleTheme={toggleTheme}
       user={user}
       isAuthenticated={isAuthenticated}
-      onOpenAuth={(mode = 'login') => {
-        setAuthModalMode(mode);
-        setIsAuthModalOpen(true);
-      }}
+      onOpenAuth={handleOpenAuth}
       onLogout={() => {
         logout();
         showToast('Signed Out', 'You have been signed out successfully.', 'info');
@@ -133,10 +135,7 @@ export const App: React.FC = () => {
           }}
           onShowToast={showToast}
           isAuthenticated={isAuthenticated}
-          onOpenAuth={(mode = 'login') => {
-            setAuthModalMode(mode);
-            setIsAuthModalOpen(true);
-          }}
+          onOpenAuth={handleOpenAuth}
         />
       ) : (
         <WorkflowBuilder
@@ -145,10 +144,7 @@ export const App: React.FC = () => {
           onShowToast={showToast}
           theme={theme}
           isAuthenticated={isAuthenticated}
-          onOpenAuth={(mode = 'login') => {
-            setAuthModalMode(mode);
-            setIsAuthModalOpen(true);
-          }}
+          onOpenAuth={handleOpenAuth}
         />
       )}
 

@@ -109,10 +109,9 @@ public final class DagEngine {
             colors.put(id, WHITE);
         }
 
-        List<String> path = new ArrayList<>();
         for (String id : uniqueTasks) {
             if (colors.get(id) == WHITE) {
-                dfs(id, adj, colors, path, cycleNodesSet, errors);
+                iterativeDfs(id, adj, colors, cycleNodesSet, errors);
             }
         }
 
@@ -216,39 +215,61 @@ public final class DagEngine {
         return topologicalSort(TaskGraph.of(taskIds, edges));
     }
 
-    private static void dfs(
-        String u,
+    private static void iterativeDfs(
+        String startNode,
         Map<String, List<String>> adj,
         Map<String, Integer> colors,
-        List<String> path,
         Set<String> cycleNodesSet,
         List<String> errors
     ) {
-        colors.put(u, GRAY);
-        path.add(u);
+        Deque<DfsFrame> stack = new ArrayDeque<>();
+        List<String> path = new ArrayList<>();
 
-        for (String v : adj.getOrDefault(u, List.of())) {
-            int color = colors.get(v);
-            if (color == GRAY) {
-                // Cycle detected
-                cycleNodesSet.add(v);
-                cycleNodesSet.add(u);
+        colors.put(startNode, GRAY);
+        path.add(startNode);
+        stack.push(new DfsFrame(startNode, adj.getOrDefault(startNode, List.of())));
 
-                int cycleStart = path.indexOf(v);
-                if (cycleStart != -1) {
-                    List<String> cyclePath = new ArrayList<>(path.subList(cycleStart, path.size()));
-                    cycleNodesSet.addAll(cyclePath);
-                    cyclePath.add(v);
-                    errors.add("Cyclic dependency: " + String.join(" -> ", cyclePath));
-                } else {
-                    errors.add("Cyclic dependency involving task: " + v);
+        while (!stack.isEmpty()) {
+            DfsFrame frame = stack.peek();
+            if (frame.nextNeighborIndex < frame.neighbors.size()) {
+                String v = frame.neighbors.get(frame.nextNeighborIndex++);
+                int color = colors.getOrDefault(v, WHITE);
+                if (color == GRAY) {
+                    // Cycle detected
+                    cycleNodesSet.add(v);
+                    cycleNodesSet.add(frame.node);
+
+                    int cycleStart = path.indexOf(v);
+                    if (cycleStart != -1) {
+                        List<String> cyclePath = new ArrayList<>(path.subList(cycleStart, path.size()));
+                        cycleNodesSet.addAll(cyclePath);
+                        cyclePath.add(v);
+                        errors.add("Cyclic dependency: " + String.join(" -> ", cyclePath));
+                    } else {
+                        errors.add("Cyclic dependency involving task: " + v);
+                    }
+                } else if (color == WHITE) {
+                    colors.put(v, GRAY);
+                    path.add(v);
+                    stack.push(new DfsFrame(v, adj.getOrDefault(v, List.of())));
                 }
-            } else if (color == WHITE) {
-                dfs(v, adj, colors, path, cycleNodesSet, errors);
+            } else {
+                stack.pop();
+                path.remove(path.size() - 1);
+                colors.put(frame.node, BLACK);
             }
         }
+    }
 
-        path.remove(path.size() - 1);
-        colors.put(u, BLACK);
+    private static final class DfsFrame {
+        private final String node;
+        private final List<String> neighbors;
+        private int nextNeighborIndex;
+
+        private DfsFrame(String node, List<String> neighbors) {
+            this.node = node;
+            this.neighbors = neighbors;
+            this.nextNeighborIndex = 0;
+        }
     }
 }
