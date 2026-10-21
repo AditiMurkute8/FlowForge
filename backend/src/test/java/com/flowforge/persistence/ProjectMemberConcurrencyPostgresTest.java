@@ -256,6 +256,10 @@ class ProjectMemberConcurrencyPostgresTest {
         projectMemberService.removeMember(testProject.getId(), admin1.getId());
         assertThat(countAdmins(testProject.getId())).isEqualTo(1);
 
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(admin2, null, Collections.emptyList())
+        );
+
         assertThatThrownBy(() -> projectMemberService.removeMember(testProject.getId(), admin2.getId()))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(countAdmins(testProject.getId())).isEqualTo(1);
