@@ -130,6 +130,8 @@ export class AuthSessionManager {
   private currentActionId: number = 0;
   private isInitialized: boolean = false;
   private readonly autoConnectTokenGetter: boolean;
+  private initPromise: Promise<void> | null = null;
+  private isDisposed: boolean = false;
 
   constructor(config: AuthSessionManagerConfig = {}) {
     this.storage = config.storage ?? sessionStorageAuthStorage;
@@ -155,6 +157,7 @@ export class AuthSessionManager {
   }
 
   connectTokenGetter(): void {
+    this.isDisposed = false;
     if (this.autoConnectTokenGetter) {
       setAuthTokenGetter(() => this.state.token);
       setUnauthorizedHandler((error) => {
@@ -187,15 +190,20 @@ export class AuthSessionManager {
    * If a stored token is present, validates it against /api/v1/auth/me before declaring the session authenticated.
    * On 401, clears the invalid token. On network/server errors, leaves the token stored.
    */
-  async initialize(): Promise<void> {
+  initialize(): Promise<void> {
     this.connectTokenGetter();
+
     if (this.isInitialized) {
-      return;
+      return Promise.resolve();
     }
-    this.isInitialized = true;
+
+    if (this.initPromise) {
+      return this.initPromise;
+    }
 
     const storedToken = this.storage.getToken();
     if (!storedToken || !storedToken.trim()) {
+      this.isInitialized = true;
       this.setState({
         user: null,
         token: null,
@@ -204,7 +212,7 @@ export class AuthSessionManager {
         isInitializing: false,
         error: null,
       });
-      return;
+      return Promise.resolve();
     }
 
     const trimmedToken = storedToken.trim();
@@ -217,52 +225,60 @@ export class AuthSessionManager {
       error: null,
     });
 
-    try {
-      const userProfile = await this.getCurrentUserFn({
-        ...this.clientOptions,
-        token: trimmedToken,
-      });
+    this.initPromise = (async () => {
+      try {
+        const userProfile = await this.getCurrentUserFn({
+          ...this.clientOptions,
+          token: trimmedToken,
+        });
 
-      if (actionId !== this.currentActionId) {
-        // Discard result if superseded by a newer action (e.g. logout)
-        return;
-      }
+        if (this.isDisposed || actionId !== this.currentActionId) {
+          // Discard result if superseded by a newer action (e.g. logout) or disposed
+          return;
+        }
 
-      this.setState({
-        user: userProfile,
-        token: trimmedToken,
-        isAuthenticated: true,
-        isLoading: false,
-        isInitializing: false,
-        error: null,
-      });
-    } catch (err) {
-      if (actionId !== this.currentActionId) {
-        return;
-      }
-
-      if (err instanceof FlowForgeApiError && (err.isUnauthorized || err.status === 401)) {
-        // Explicit 401 Unauthorized: token is invalid or expired -> purge session
-        this.storage.clearToken();
+        this.isInitialized = true;
         this.setState({
-          user: null,
-          token: null,
-          isAuthenticated: false,
+          user: userProfile,
+          token: trimmedToken,
+          isAuthenticated: true,
           isLoading: false,
           isInitializing: false,
           error: null,
         });
-      } else {
-        // Network failure, 5xx server error, or offline server
-        // Preserve stored token so user does not lose session due to temporary outage
-        this.setState({
-          isAuthenticated: false,
-          isLoading: false,
-          isInitializing: false,
-          error: extractSafeErrorMessage(err),
-        });
+      } catch (err) {
+        if (this.isDisposed || actionId !== this.currentActionId) {
+          return;
+        }
+
+        if (err instanceof FlowForgeApiError && (err.isUnauthorized || err.status === 401)) {
+          // Explicit 401 Unauthorized: token is invalid or expired -> purge session
+          this.storage.clearToken();
+          this.isInitialized = true;
+          this.setState({
+            user: null,
+            token: null,
+            isAuthenticated: false,
+            isLoading: false,
+            isInitializing: false,
+            error: null,
+          });
+        } else {
+          // Network failure, 5xx server error, or offline server
+          // Preserve stored token so user does not lose session due to temporary outage
+          this.setState({
+            isAuthenticated: false,
+            isLoading: false,
+            isInitializing: false,
+            error: extractSafeErrorMessage(err),
+          });
+        }
+      } finally {
+        this.initPromise = null;
       }
-    }
+    })();
+
+    return this.initPromise;
   }
 
   /**
@@ -270,28 +286,31 @@ export class AuthSessionManager {
    */
   async login(request: LoginRequest): Promise<AuthResponseDto> {
     const actionId = ++this.currentActionId;
-    this.setState({ isLoading: true, error: null });
+    this.setState({ isLoading: true, isInitializing: false, error: null });
 
     try {
       const response = await this.loginFn(request, this.clientOptions);
 
-      if (actionId !== this.currentActionId) {
+      if (this.isDisposed || actionId !== this.currentActionId) {
         return response;
       }
 
       this.storage.setToken(response.token);
+      this.isInitialized = true;
       this.setState({
         user: response.user,
         token: response.token,
         isAuthenticated: true,
         isLoading: false,
+        isInitializing: false,
         error: null,
       });
       return response;
     } catch (err) {
-      if (actionId === this.currentActionId) {
+      if (!this.isDisposed && actionId === this.currentActionId) {
         this.setState({
           isLoading: false,
+          isInitializing: false,
           error: extractSafeErrorMessage(err),
         });
       }
@@ -304,28 +323,31 @@ export class AuthSessionManager {
    */
   async register(request: RegisterRequest): Promise<AuthResponseDto> {
     const actionId = ++this.currentActionId;
-    this.setState({ isLoading: true, error: null });
+    this.setState({ isLoading: true, isInitializing: false, error: null });
 
     try {
       const response = await this.registerFn(request, this.clientOptions);
 
-      if (actionId !== this.currentActionId) {
+      if (this.isDisposed || actionId !== this.currentActionId) {
         return response;
       }
 
       this.storage.setToken(response.token);
+      this.isInitialized = true;
       this.setState({
         user: response.user,
         token: response.token,
         isAuthenticated: true,
         isLoading: false,
+        isInitializing: false,
         error: null,
       });
       return response;
     } catch (err) {
-      if (actionId === this.currentActionId) {
+      if (!this.isDisposed && actionId === this.currentActionId) {
         this.setState({
           isLoading: false,
+          isInitializing: false,
           error: extractSafeErrorMessage(err),
         });
       }
@@ -340,11 +362,13 @@ export class AuthSessionManager {
   logout(): void {
     this.currentActionId++;
     this.storage.clearToken();
+    this.isInitialized = true;
     this.setState({
       user: null,
       token: null,
       isAuthenticated: false,
       isLoading: false,
+      isInitializing: false,
       error: null,
     });
   }
@@ -369,6 +393,7 @@ export class AuthSessionManager {
     }
     this.currentActionId++;
     this.storage.clearToken();
+    this.isInitialized = true;
     this.setState({
       user: null,
       token: null,
@@ -391,7 +416,7 @@ export class AuthSessionManager {
   }
 
   dispose(): void {
-    this.currentActionId++;
+    this.isDisposed = true;
     this.listeners.clear();
     this.sessionExpiredListeners.clear();
     if (this.autoConnectTokenGetter) {
@@ -402,7 +427,7 @@ export class AuthSessionManager {
 }
 
 export interface AuthProviderProps extends AuthSessionManagerConfig {
-  children: React.ReactNode;
+  children?: React.ReactNode;
 }
 
 /**
