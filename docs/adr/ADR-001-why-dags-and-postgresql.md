@@ -1,3 +1,4 @@
+
 # ADR-001: Adoption of Directed Acyclic Graphs (DAGs) and PostgreSQL as the Core Orchestration and Persistence Model
 
 * **Status:** Accepted
@@ -109,3 +110,14 @@ We chose to build FlowForge around two foundational architectural components:
 * **Distributed Dead-Lettering and Worker Crash Recovery (Phase 2):** Automated task reassignment upon worker failure.
 * **Durable Event Streaming (Phase 4):** Decoupling scheduler and workers via Apache Kafka topics.
 * **Distributed Leader Election & Multi-Scheduler Coordination (Phase 7):** Active-passive or active-active multi-node schedulers using Redis or database locks.
+
+---
+
+## 7. Architectural Addendum: Versioned Document DAGs vs. Normalized Relational Tables
+
+The original Phase 0 draft considered decomposing DAGs into normalized relational `tasks` and `task_dependencies` tables. During Phase 1 implementation, we formalized the decision to persist workflow DAG topologies as immutable `JSONB` documents in `workflow_versions.graph_payload` while retaining relational persistence for `projects`, `workflows`, `workflow_versions`, `workflow_runs`, and `task_runs`.
+
+### Rationale for Document-Backed DAG Snapshots
+1. **Atomic Immutability:** Workflows evolve through versioned snapshots. Storing graph topology as a validated `JSONB` payload allows atomic creation of an immutable version (`O(1)` insert) and protects against partial graph mutations.
+2. **Simplified Version Branching:** Branching or editing a canvas draft does not mutate relational task rows. The entire topology is validated in memory by [`DagEngine`](../../backend/src/main/java/com/flowforge/core/DagEngine.java) and persisted as a cohesive snapshot upon user approval.
+3. **Execution Separation:** Execution state belongs to runs, not static definitions. Individual task lifecycles are persisted in [`task_runs`](../../backend/src/main/resources/db/migration/V3__create_workflow_runs_schema.sql) linked to `workflow_runs`, capturing runtime attempts, durations, and error traces without relational churn on definition tables.

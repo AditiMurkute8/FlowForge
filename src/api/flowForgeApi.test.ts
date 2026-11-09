@@ -25,6 +25,9 @@ import {
   login,
   getMe,
   deleteProject,
+  updateProject,
+  updateWorkflow,
+  deleteWorkflow,
   fetchProjectMembers,
   addOrUpdateProjectMember,
   removeProjectMember,
@@ -2222,6 +2225,275 @@ describe('flowForgeApi', () => {
           expect((err as FlowForgeApiError).status).toBe(0);
         }
       });
+    });
+  });
+
+  describe('updateProject', () => {
+    it('sends PUT /api/v1/projects/{projectId} with payload and auth token', async () => {
+      let capturedUrl = '';
+      let capturedInit: RequestInit | undefined;
+
+      const mockResponse = {
+        id: 'proj-123',
+        name: 'Updated Project Name',
+        description: 'Updated Description',
+        createdAt: '2026-10-20T00:00:00Z',
+        updatedAt: '2026-10-20T01:00:00Z',
+      };
+
+      const mockFetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        capturedUrl = url;
+        capturedInit = init;
+        return new Response(JSON.stringify(mockResponse), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+
+      const res = await updateProject(
+        'proj-123',
+        { name: 'Updated Project Name', description: 'Updated Description' },
+        { baseUrl: 'http://localhost:8080', fetchFn: mockFetch, token: 'jwt-auth-token' }
+      );
+
+      expect(capturedUrl).toBe('http://localhost:8080/api/v1/projects/proj-123');
+      expect(capturedInit?.method).toBe('PUT');
+      expect(capturedInit?.headers).toEqual({
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: 'Bearer jwt-auth-token',
+      });
+      expect(JSON.parse(capturedInit?.body as string)).toEqual({
+        name: 'Updated Project Name',
+        description: 'Updated Description',
+      });
+      expect(res).toEqual(mockResponse);
+    });
+
+    it('handles 400 Bad Request when project name is empty', async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 400,
+            error: 'Bad Request',
+            message: 'Project name must not be blank',
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await expect(
+        updateProject(
+          'proj-123',
+          { name: '   ', description: 'Blank name' },
+          { baseUrl: 'http://localhost:8080', fetchFn: mockFetch }
+        )
+      ).rejects.toThrow('Project name must not be blank');
+    });
+
+    it('handles 403 Forbidden when user is a VIEWER', async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 403,
+            error: 'Forbidden',
+            message: 'User does not have EDIT access to project proj-123',
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await expect(
+        updateProject(
+          'proj-123',
+          { name: 'Viewer Edit Attempt' },
+          { baseUrl: 'http://localhost:8080', fetchFn: mockFetch }
+        )
+      ).rejects.toThrow('User does not have EDIT access to project proj-123');
+    });
+
+    it('handles network failure with status 0', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('Connection timed out'));
+
+      try {
+        await updateProject('proj-123', { name: 'New Name' }, { fetchFn: mockFetch });
+        expect.unreachable('Should have thrown FlowForgeApiError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(FlowForgeApiError);
+        expect((err as FlowForgeApiError).status).toBe(0);
+      }
+    });
+  });
+
+  describe('updateWorkflow', () => {
+    it('sends PUT /api/v1/workflows/{workflowId} with payload and auth token', async () => {
+      let capturedUrl = '';
+      let capturedInit: RequestInit | undefined;
+
+      const mockResponse = {
+        id: 'wf-456',
+        projectId: 'proj-123',
+        name: 'Renamed Workflow',
+        slug: 'existing-slug',
+        description: 'New workflow notes',
+        latestVersion: 3,
+        createdAt: '2026-10-20T00:00:00Z',
+        updatedAt: '2026-10-20T02:00:00Z',
+      };
+
+      const mockFetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        capturedUrl = url;
+        capturedInit = init;
+        return new Response(JSON.stringify(mockResponse), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+
+      const res = await updateWorkflow(
+        'wf-456',
+        { name: 'Renamed Workflow', description: 'New workflow notes' },
+        { baseUrl: 'http://localhost:8080', fetchFn: mockFetch, token: 'jwt-auth-token' }
+      );
+
+      expect(capturedUrl).toBe('http://localhost:8080/api/v1/workflows/wf-456');
+      expect(capturedInit?.method).toBe('PUT');
+      expect(capturedInit?.headers).toEqual({
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: 'Bearer jwt-auth-token',
+      });
+      expect(JSON.parse(capturedInit?.body as string)).toEqual({
+        name: 'Renamed Workflow',
+        description: 'New workflow notes',
+      });
+      expect(res).toEqual(mockResponse);
+    });
+
+    it('handles 400 Bad Request when workflow name is empty', async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 400,
+            error: 'Bad Request',
+            message: 'Workflow name must not be blank',
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await expect(
+        updateWorkflow(
+          'wf-456',
+          { name: '' },
+          { baseUrl: 'http://localhost:8080', fetchFn: mockFetch }
+        )
+      ).rejects.toThrow('Workflow name must not be blank');
+    });
+
+    it('handles 404 Not Found when workflow does not exist', async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 404,
+            error: 'Not Found',
+            message: 'Workflow not found: wf-999',
+          }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await expect(
+        updateWorkflow(
+          'wf-999',
+          { name: 'Missing Workflow' },
+          { baseUrl: 'http://localhost:8080', fetchFn: mockFetch }
+        )
+      ).rejects.toThrow('Workflow not found: wf-999');
+    });
+
+    it('handles network failure with status 0', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('Connection reset'));
+
+      try {
+        await updateWorkflow('wf-456', { name: 'Name' }, { fetchFn: mockFetch });
+        expect.unreachable('Should have thrown FlowForgeApiError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(FlowForgeApiError);
+        expect((err as FlowForgeApiError).status).toBe(0);
+      }
+    });
+  });
+
+  describe('deleteWorkflow', () => {
+    it('sends DELETE /api/v1/workflows/{workflowId} and handles 204 No Content', async () => {
+      let capturedUrl = '';
+      let capturedInit: RequestInit | undefined;
+
+      const mockFetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        capturedUrl = url;
+        capturedInit = init;
+        return new Response(null, { status: 204 });
+      });
+
+      await deleteWorkflow('wf-456', {
+        baseUrl: 'http://localhost:8080',
+        fetchFn: mockFetch,
+        token: 'auth-token',
+      });
+
+      expect(capturedUrl).toBe('http://localhost:8080/api/v1/workflows/wf-456');
+      expect(capturedInit?.method).toBe('DELETE');
+      expect(capturedInit?.headers).toEqual({
+        Accept: 'application/json',
+        Authorization: 'Bearer auth-token',
+      });
+    });
+
+    it('handles 403 Forbidden when user is not authorized', async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 403,
+            error: 'Forbidden',
+            message: 'User does not have admin permissions',
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await expect(
+        deleteWorkflow('wf-456', { baseUrl: 'http://localhost:8080', fetchFn: mockFetch })
+      ).rejects.toThrow('User does not have admin permissions');
+    });
+
+    it('handles 404 Not Found when workflow does not exist', async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 404,
+            error: 'Not Found',
+            message: 'Workflow not found: wf-456',
+          }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await expect(
+        deleteWorkflow('wf-456', { baseUrl: 'http://localhost:8080', fetchFn: mockFetch })
+      ).rejects.toThrow('Workflow not found: wf-456');
+    });
+
+    it('handles network failure with status 0', async () => {
+      const mockFetch = vi.fn().mockRejectedValue(new Error('Connection broken'));
+
+      try {
+        await deleteWorkflow('wf-456', { fetchFn: mockFetch });
+        expect.unreachable('Should have thrown FlowForgeApiError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(FlowForgeApiError);
+        expect((err as FlowForgeApiError).status).toBe(0);
+      }
     });
   });
 });

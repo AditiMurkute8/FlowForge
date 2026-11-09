@@ -169,4 +169,48 @@ class WorkflowServiceTest {
 
         verify(workflowRepository, never()).delete(any());
     }
+
+    @Test
+    @DisplayName("updateWorkflow updates name and description successfully")
+    void testUpdateWorkflowSuccess() {
+        UUID id = UUID.randomUUID();
+        Project project = new Project("P", "p", null);
+        Workflow existing = new Workflow(id, project, "Old Flow", "old-flow", "Old Desc");
+        when(workflowRepository.findById(id)).thenReturn(Optional.of(existing));
+        when(workflowRepository.save(existing)).thenAnswer(inv -> inv.getArgument(0));
+
+        Workflow updated = workflowService.updateWorkflow(id, "New Flow", "New Desc");
+
+        assertThat(updated.getName()).isEqualTo("New Flow");
+        assertThat(updated.getDescription()).isEqualTo("New Desc");
+        assertThat(updated.getSlug()).isEqualTo("old-flow"); // slug is preserved
+        verify(workflowRepository).save(existing);
+    }
+
+    @Test
+    @DisplayName("updateWorkflow throws IllegalArgumentException when name is blank")
+    void testUpdateWorkflowBlankName() {
+        UUID id = UUID.randomUUID();
+        Workflow existing = new Workflow(id, new Project("P", "p", null), "Flow", "flow", null);
+        when(workflowRepository.findById(id)).thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> workflowService.updateWorkflow(id, "   ", "Desc"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Workflow name must not be blank");
+
+        verify(workflowRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("updateWorkflow throws ResourceNotFoundException when workflow does not exist")
+    void testUpdateWorkflowNotFound() {
+        UUID id = UUID.randomUUID();
+        when(workflowRepository.findById(id)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> workflowService.updateWorkflow(id, "Valid", "Desc"))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("Workflow not found: " + id);
+
+        verify(workflowRepository, never()).save(any());
+    }
 }

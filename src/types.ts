@@ -171,6 +171,11 @@ export interface CreateProjectRequest {
   description?: string;
 }
 
+export interface UpdateProjectRequest {
+  name: string;
+  description?: string;
+}
+
 export interface ProjectResponseDto {
   id: string;
   name: string;
@@ -183,6 +188,11 @@ export interface ProjectResponseDto {
 export interface CreateWorkflowRequest {
   name: string;
   slug?: string;
+  description?: string;
+}
+
+export interface UpdateWorkflowRequest {
+  name: string;
   description?: string;
 }
 

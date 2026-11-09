@@ -4,6 +4,7 @@ import type { Project, PipelineHealth, ProjectResponseDto, ProjectRole } from '.
 import {
   fetchProjects as defaultFetchProjects,
   createProject as defaultCreateProject,
+  updateProject as defaultUpdateProject,
   deleteProject as defaultDeleteProject,
   fetchProjectMembers as defaultFetchProjectMembers,
   FlowForgeApiError,
@@ -31,6 +32,7 @@ import {
   Users,
   Trash2,
   ShieldAlert,
+  Pencil,
 } from 'lucide-react';
 
 export interface ProjectsDashboardProps {
@@ -42,6 +44,7 @@ export interface ProjectsDashboardProps {
   ) => void;
   fetchProjectsFn?: typeof defaultFetchProjects;
   createProjectFn?: typeof defaultCreateProject;
+  updateProjectFn?: typeof defaultUpdateProject;
   deleteProjectFn?: typeof defaultDeleteProject;
   fetchProjectMembersFn?: typeof defaultFetchProjectMembers;
   isAuthenticated?: boolean;
@@ -57,6 +60,7 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
   onShowToast,
   fetchProjectsFn = defaultFetchProjects,
   createProjectFn = defaultCreateProject,
+  updateProjectFn = defaultUpdateProject,
   deleteProjectFn = defaultDeleteProject,
   fetchProjectMembersFn = defaultFetchProjectMembers,
   isAuthenticated,
@@ -84,6 +88,13 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Edit Project State
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [editProjectName, setEditProjectName] = useState('');
+  const [editProjectDesc, setEditProjectDesc] = useState('');
+  const [isUpdatingProject, setIsUpdatingProject] = useState<boolean>(false);
+  const [editProjectError, setEditProjectError] = useState<string | null>(null);
 
   // New Project Form State
   const [newProjectName, setNewProjectName] = useState('');
@@ -372,6 +383,42 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
     }
   };
 
+  const handleUpdateProject = async () => {
+    if (!editingProject || !editProjectName.trim()) return;
+    setIsUpdatingProject(true);
+    setEditProjectError(null);
+    try {
+      const updated = await updateProjectFn(editingProject.id, {
+        name: editProjectName.trim(),
+        description: editProjectDesc.trim() || undefined,
+      });
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === editingProject.id
+            ? { ...p, name: updated.name, description: updated.description || '' }
+            : p
+        )
+      );
+      if (onShowToast) {
+        onShowToast('Project Updated', `"${updated.name}" has been updated.`, 'success');
+      }
+      setEditingProject(null);
+    } catch (err) {
+      let msg = 'Failed to update project.';
+      if (err instanceof FlowForgeApiError) {
+        msg = err.message;
+      } else if (err instanceof Error) {
+        msg = err.message;
+      }
+      setEditProjectError(msg);
+      if (onShowToast) {
+        onShowToast('Update Failed', msg, 'error');
+      }
+    } finally {
+      setIsUpdatingProject(false);
+    }
+  };
+
   const renderHealthIndicator = (health: PipelineHealth) => {
     switch (health) {
       case 'HEALTHY':
@@ -655,6 +702,7 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
             {filteredProjects.map((project) => {
               const userRole = projectRoles[project.id];
               const isAdmin = userRole === 'ADMIN';
+              const canEdit = userRole === 'ADMIN' || userRole === 'DEVELOPER';
 
               return (
                 <div
@@ -735,6 +783,23 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
                       </Button>
                     )}
 
+                    {/* Admin & Developer: Edit Project Metadata */}
+                    {canEdit && !project.isMock && (
+                      <button
+                        onClick={() => {
+                          setEditProjectError(null);
+                          setEditingProject(project);
+                          setEditProjectName(project.name);
+                          setEditProjectDesc(project.description || '');
+                        }}
+                        className="flex items-center justify-center h-7 w-7 rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-emphasis)] transition-colors cursor-pointer"
+                        data-testid={`edit-project-button-${project.id}`}
+                        title={`Edit project ${project.name}`}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                    )}
+
                     {/* Admin Only: Project Deletion */}
                     {isAdmin && !project.isMock && (
                       <button
@@ -756,6 +821,79 @@ export const ProjectsDashboard: React.FC<ProjectsDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* Edit Project Modal */}
+      <Modal
+        isOpen={Boolean(editingProject)}
+        onClose={() => {
+          if (!isUpdatingProject) {
+            setEditingProject(null);
+            setEditProjectError(null);
+          }
+        }}
+        title="Edit Project"
+        description="Update project name and description"
+        maxWidth="md"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setEditingProject(null);
+                setEditProjectError(null);
+              }}
+              disabled={isUpdatingProject}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleUpdateProject}
+              isLoading={isUpdatingProject}
+              disabled={!editProjectName.trim()}
+              data-testid="save-edit-project-button"
+            >
+              Save Changes
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3.5 text-xs">
+          {editProjectError && (
+            <div
+              data-testid="edit-project-error"
+              className="rounded-[5px] border border-[var(--status-red-border)] bg-[var(--status-red-bg)] p-2.5 text-xs text-[var(--status-red-text)]"
+            >
+              {editProjectError}
+            </div>
+          )}
+          <div>
+            <label className="block text-[11px] font-mono text-[var(--text-secondary)] mb-1">
+              Project Name <span className="text-[var(--status-red-text)]">*</span>
+            </label>
+            <Input
+              value={editProjectName}
+              onChange={(e) => setEditProjectName(e.target.value)}
+              placeholder="e.g. Fraud Detection Engine"
+              data-testid="edit-project-name-input"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-mono text-[var(--text-secondary)] mb-1">
+              Description
+            </label>
+            <textarea
+              value={editProjectDesc}
+              onChange={(e) => setEditProjectDesc(e.target.value)}
+              placeholder="Brief summary of pipeline responsibilities..."
+              rows={3}
+              data-testid="edit-project-desc-input"
+              className="w-full rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)]"
+            />
+          </div>
+        </div>
+      </Modal>
 
       {/* Create Project Modal */}
       <Modal

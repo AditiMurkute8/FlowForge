@@ -23,11 +23,13 @@ import type {
   ExecuteWorkflowResponse,
   WorkflowResponseDto,
   WorkflowVersionResponseDto,
+  WorkflowRunResponseDto,
   ProjectRole,
 } from '../types';
 import {
   fetchWorkflows as defaultFetchWorkflows,
   createWorkflow as defaultCreateWorkflow,
+  updateWorkflow as defaultUpdateWorkflow,
   getLatestWorkflowVersion as defaultGetLatestWorkflowVersion,
   createWorkflowVersion as defaultCreateWorkflowVersion,
   fetchWorkflowRuns as defaultFetchWorkflowRuns,
@@ -45,6 +47,7 @@ import { TaskPalette } from '../components/workflow/TaskPalette';
 import { TaskInspector } from '../components/workflow/TaskInspector';
 import { ExecutionModal } from '../components/workflow/ExecutionModal';
 import { RunHistoryModal } from '../components/workflow/RunHistoryModal';
+import { RunDashboardModal } from '../components/workflow/RunDashboardModal';
 import {
   executeWorkflowValidation,
 } from '../utils/dagValidationAdapters';
@@ -55,9 +58,12 @@ import {
 import {
   executeDurableWorkflowRun,
   isCanvasDirty,
+  applyDurableRunTaskResults,
 } from '../utils/durableExecutionAdapters';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
+import { Modal } from '../components/ui/Modal';
+import { Input } from '../components/ui/Input';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -71,6 +77,7 @@ import {
   History,
   Users,
   Info,
+  Pencil,
 } from 'lucide-react';
 
 export interface WorkflowBuilderProps {
@@ -82,6 +89,7 @@ export interface WorkflowBuilderProps {
   executeApiFn?: (request: ExecuteWorkflowRequest) => Promise<ExecuteWorkflowResponse>;
   fetchWorkflowsFn?: typeof defaultFetchWorkflows;
   createWorkflowFn?: typeof defaultCreateWorkflow;
+  updateWorkflowFn?: typeof defaultUpdateWorkflow;
   getLatestVersionFn?: typeof defaultGetLatestWorkflowVersion;
   createVersionFn?: typeof defaultCreateWorkflowVersion;
   fetchRunsFn?: typeof defaultFetchWorkflowRuns;
@@ -102,6 +110,7 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   executeApiFn,
   fetchWorkflowsFn = defaultFetchWorkflows,
   createWorkflowFn = defaultCreateWorkflow,
+  updateWorkflowFn = defaultUpdateWorkflow,
   getLatestVersionFn = defaultGetLatestWorkflowVersion,
   createVersionFn = defaultCreateWorkflowVersion,
   fetchRunsFn = defaultFetchWorkflowRuns,
@@ -153,6 +162,16 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
   const [historyRefreshKey, setHistoryRefreshKey] = useState<number>(0);
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionResult, setExecutionResult] = useState<ExecutionRunResult | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [isRunDashboardOpen, setIsRunDashboardOpen] = useState(false);
+  const [durableDashboardRun, setDurableDashboardRun] = useState<WorkflowRunResponseDto | null>(null);
+
+  // Workflow Metadata Edit State
+  const [isEditWorkflowOpen, setIsEditWorkflowOpen] = useState(false);
+  const [editWorkflowName, setEditWorkflowName] = useState('');
+  const [editWorkflowDesc, setEditWorkflowDesc] = useState('');
+  const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
+  const [editWorkflowError, setEditWorkflowError] = useState<string | null>(null);
 
   // Synchronous in-flight execution lock to prevent race conditions from rapid duplicate triggers
   const isExecutingRef = useRef<boolean>(false);
@@ -208,11 +227,25 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
               if (page.content && page.content.length > 0) {
                 activeWf = { ...page.content[0], isMock: false };
               } else {
-                const created: WorkflowResponseDto = await createWorkflowFn(projectId, {
-                  name: 'Main Pipeline',
-                  description: 'Default orchestration workflow',
-                });
-                activeWf = { ...created, isMock: false };
+                try {
+                  const created: WorkflowResponseDto = await createWorkflowFn(projectId, {
+                    name: 'Main Pipeline',
+                    description: 'Default orchestration workflow',
+                  });
+                  activeWf = { ...created, isMock: false };
+                } catch (createErr) {
+                  const isConflict =
+                    createErr instanceof FlowForgeApiError &&
+                    (createErr.isConflict || createErr.status === 409);
+                  if (isConflict) {
+                    const fallbackPage = await fetchWorkflowsFn(projectId, { page: 0, size: 10 });
+                    if (fallbackPage.content && fallbackPage.content.length > 0) {
+                      activeWf = { ...fallbackPage.content[0], isMock: false };
+                    }
+                  } else {
+                    throw createErr;
+                  }
+                }
               }
             } catch (err) {
               const isAuthError = err instanceof FlowForgeApiError && (err.isUnauthorized || err.status === 401);
@@ -396,6 +429,32 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     onShowToast('Pipeline Reset', 'Restored 4-node sample DAG.');
   };
 
+  const handleUpdateWorkflow = async () => {
+    if (!currentWorkflow || !currentWorkflow.id || !editWorkflowName.trim()) return;
+    setIsUpdatingWorkflow(true);
+    setEditWorkflowError(null);
+    try {
+      const updated = await updateWorkflowFn(currentWorkflow.id, {
+        name: editWorkflowName.trim(),
+        description: editWorkflowDesc.trim() || undefined,
+      });
+      setCurrentWorkflow((prev) => (prev ? { ...prev, name: updated.name } : null));
+      onShowToast('Workflow Updated', `Workflow renamed to "${updated.name}".`, 'success');
+      setIsEditWorkflowOpen(false);
+    } catch (err) {
+      let msg = 'Failed to update workflow.';
+      if (err instanceof FlowForgeApiError) {
+        msg = err.message;
+      } else if (err instanceof Error) {
+        msg = err.message;
+      }
+      setEditWorkflowError(msg);
+      onShowToast('Update Failed', msg, 'error');
+    } finally {
+      setIsUpdatingWorkflow(false);
+    }
+  };
+
   const handleRunSimulation = useCallback(async () => {
     // Synchronous guard: If already in flight, reopen modal without dispatching duplicate request
     if (isExecutingRef.current || isExecuting) {
@@ -464,6 +523,39 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     }
 
     isExecutingRef.current = true;
+    setIsRunDashboardOpen(true);
+    setActiveRunId(null);
+    setDurableDashboardRun(null);
+
+    // Concurrently discover the committed durable run ID from backend
+    if (currentWorkflow?.id && !currentWorkflow.isMock) {
+      void (async () => {
+        try {
+          for (let attempt = 0; attempt < 10; attempt++) {
+            if (!isExecutingRef.current) break;
+            const res = await fetchRunsFn(currentWorkflow.id, { page: 0, size: 1 });
+            const latest = res.content?.[0];
+            if (latest) {
+              setActiveRunId(latest.id);
+              try {
+                const fullRun = await getRunFn(latest.id);
+                setDurableDashboardRun(fullRun);
+                if (fullRun.tasks) {
+                  setNodes((prev) => applyDurableRunTaskResults(prev, fullRun.tasks));
+                }
+              } catch {
+                // Ignore transient fetch error
+              }
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        } catch {
+          // Fall back gracefully
+        }
+      })();
+    }
+
     try {
       await executeDurableWorkflowRun({
         workflowId: currentWorkflow?.id,
@@ -477,8 +569,12 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
         setNodes,
         onShowToast,
         isAuthenticated: effectiveIsAuthenticated,
-        onExecutionComplete: () => {
+        onExecutionComplete: (run) => {
           setHistoryRefreshKey((prev) => prev + 1);
+          if (run?.id) {
+            setActiveRunId(run.id);
+            setDurableDashboardRun(run);
+          }
         },
         executeDurableApiFn: executeDurableRunFn,
       });
@@ -496,6 +592,8 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
     setIsExecuting,
     setNodes,
     onShowToast,
+    fetchRunsFn,
+    getRunFn,
     executeDurableRunFn,
     effectiveIsAuthenticated,
     onOpenAuth,
@@ -641,6 +739,21 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
             <span className="text-xs font-semibold text-[var(--text-primary)]">
               {currentWorkflow ? currentWorkflow.name : 'Clickstream Ingestion & Deduplication'}
             </span>
+            {permissions.canEditWorkflows && currentWorkflow && !currentWorkflow.isMock && (
+              <button
+                onClick={() => {
+                  setEditWorkflowError(null);
+                  setEditWorkflowName(currentWorkflow.name);
+                  setEditWorkflowDesc('');
+                  setIsEditWorkflowOpen(true);
+                }}
+                className="flex items-center justify-center h-5 w-5 rounded-[4px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-emphasis)] transition-colors cursor-pointer"
+                data-testid="edit-workflow-button"
+                title="Edit workflow name and description"
+              >
+                <Pencil size={10} />
+              </button>
+            )}
             <Badge
               variant={currentVersion?.isValidDag === false ? 'warning' : 'cyan'}
               size="sm"
@@ -722,7 +835,7 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
             onClick={() => setIsRunHistoryOpen(true)}
             data-testid="run-history-button"
           >
-            Run History
+            Run Dashboard
           </Button>
 
           {/* Admin Only: Membership Management */}
@@ -909,17 +1022,115 @@ const WorkflowBuilderContent: React.FC<WorkflowBuilderProps> = ({
         nodes={nodes}
       />
 
+      {/* Live Durable Run Execution Dashboard */}
+      <RunDashboardModal
+        isOpen={isRunDashboardOpen}
+        onClose={() => setIsRunDashboardOpen(false)}
+        runId={activeRunId}
+        workflowId={currentWorkflow?.id}
+        workflowName={currentWorkflow?.name}
+        initialRun={durableDashboardRun}
+        getRunFn={getRunFn}
+        onRunUpdated={(updatedRun) => {
+          setDurableDashboardRun(updatedRun);
+          if (updatedRun.tasks) {
+            setNodes((prev) => applyDurableRunTaskResults(prev, updatedRun.tasks));
+          }
+        }}
+        onViewHistory={() => {
+          setIsRunDashboardOpen(false);
+          setIsRunHistoryOpen(true);
+        }}
+      />
+
       {/* Durable Run History Modal */}
       <RunHistoryModal
         isOpen={isRunHistoryOpen}
-        onClose={() => setIsRunHistoryOpen(false)}
+        onClose={() => {
+          setIsRunHistoryOpen(false);
+          setActiveRunId(null);
+        }}
         workflowId={currentWorkflow?.id}
         workflowName={currentWorkflow?.name}
         isMockWorkflow={currentWorkflow?.isMock}
         fetchRunsFn={fetchRunsFn}
         getRunFn={getRunFn}
         refreshTrigger={historyRefreshKey}
+        activeRunId={activeRunId}
       />
+
+      {/* Edit Workflow Modal */}
+      <Modal
+        isOpen={isEditWorkflowOpen}
+        onClose={() => {
+          if (!isUpdatingWorkflow) {
+            setIsEditWorkflowOpen(false);
+            setEditWorkflowError(null);
+          }
+        }}
+        title="Edit Workflow Definition"
+        description="Update workflow display name and description"
+        maxWidth="md"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setIsEditWorkflowOpen(false);
+                setEditWorkflowError(null);
+              }}
+              disabled={isUpdatingWorkflow}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleUpdateWorkflow}
+              isLoading={isUpdatingWorkflow}
+              disabled={!editWorkflowName.trim()}
+              data-testid="save-edit-workflow-button"
+            >
+              Save Changes
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3.5 text-xs">
+          {editWorkflowError && (
+            <div
+              data-testid="edit-workflow-error"
+              className="rounded-[5px] border border-[var(--status-red-border)] bg-[var(--status-red-bg)] p-2.5 text-xs text-[var(--status-red-text)]"
+            >
+              {editWorkflowError}
+            </div>
+          )}
+          <div>
+            <label className="block text-[11px] font-mono text-[var(--text-secondary)] mb-1">
+              Workflow Name <span className="text-[var(--status-red-text)]">*</span>
+            </label>
+            <Input
+              value={editWorkflowName}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditWorkflowName(e.target.value)}
+              placeholder="e.g. Daily Data Aggregator"
+              data-testid="edit-workflow-name-input"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-mono text-[var(--text-secondary)] mb-1">
+              Description
+            </label>
+            <textarea
+              value={editWorkflowDesc}
+              onChange={(e) => setEditWorkflowDesc(e.target.value)}
+              placeholder="Detailed description of execution pipeline..."
+              rows={3}
+              data-testid="edit-workflow-desc-input"
+              className="w-full rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-blue)]"
+            />
+          </div>
+        </div>
+      </Modal>
 
       {/* Project Members Modal for Admin */}
       {effectiveProjectId && isMembersModalOpen && (

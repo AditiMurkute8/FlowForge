@@ -3,7 +3,7 @@ import React from 'react';
 export type BadgeVariant = 'default' | 'success' | 'warning' | 'danger' | 'cyan' | 'outline';
 export type BadgeSize = 'sm' | 'md';
 
-interface BadgeProps {
+interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   children: React.ReactNode;
   variant?: BadgeVariant;
   size?: BadgeSize;
@@ -35,6 +35,7 @@ export const Badge: React.FC<BadgeProps> = ({
   size = 'sm',
   className = '',
   dot = false,
+  ...rest
 }) => {
   const sizeClasses =
     size === 'sm'
@@ -44,6 +45,7 @@ export const Badge: React.FC<BadgeProps> = ({
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-[3px] border font-medium leading-none ${variantStyles[variant]} ${sizeClasses} ${className}`}
+      {...rest}
     >
       {dot && <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotColors[variant]}`} />}
       {children}

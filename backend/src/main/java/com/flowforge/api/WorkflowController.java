@@ -1,6 +1,7 @@
 package com.flowforge.api;
 
 import com.flowforge.api.dto.CreateWorkflowRequest;
+import com.flowforge.api.dto.UpdateWorkflowRequest;
 import com.flowforge.api.dto.WorkflowResponse;
 import com.flowforge.domain.Workflow;
 import com.flowforge.service.WorkflowService;
@@ -56,6 +57,15 @@ public class WorkflowController {
             @PathVariable String workflowSlug
     ) {
         Workflow workflow = workflowService.getWorkflowByProjectAndSlug(projectId, workflowSlug);
+        return ResponseEntity.ok(WorkflowResponse.fromEntity(workflow));
+    }
+
+    @PutMapping("/api/v1/workflows/{workflowId}")
+    public ResponseEntity<WorkflowResponse> updateWorkflow(
+            @PathVariable UUID workflowId,
+            @Valid @RequestBody UpdateWorkflowRequest request
+    ) {
+        Workflow workflow = workflowService.updateWorkflow(workflowId, request.name(), request.description());
         return ResponseEntity.ok(WorkflowResponse.fromEntity(workflow));
     }
 

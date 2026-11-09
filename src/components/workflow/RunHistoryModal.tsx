@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type {
   WorkflowRunSummaryResponseDto,
   WorkflowRunResponseDto,
@@ -24,6 +24,7 @@ import {
   ChevronRight,
   Loader2,
   Clock,
+  Radio,
 } from 'lucide-react';
 
 export function formatDuration(durationMs: number | null | undefined): string {
@@ -67,6 +68,8 @@ export interface RunHistoryModalProps {
   fetchRunsFn?: typeof defaultFetchWorkflowRuns;
   getRunFn?: typeof defaultGetWorkflowRun;
   refreshTrigger?: number;
+  activeRunId?: string | null;
+  pollingIntervalMs?: number;
 }
 
 export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
@@ -78,6 +81,8 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
   fetchRunsFn = defaultFetchWorkflowRuns,
   getRunFn = defaultGetWorkflowRun,
   refreshTrigger,
+  activeRunId,
+  pollingIntervalMs = 1500,
 }) => {
   const [runs, setRuns] = useState<WorkflowRunSummaryResponseDto[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -91,24 +96,56 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
   const [runsError, setRunsError] = useState<string | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [isPolling, setIsPolling] = useState(false);
+
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const loadRunDetail = useCallback(
-    async (runId: string) => {
-      setIsLoadingDetail(true);
+    async (runId: string, isSilent = false) => {
+      if (!isSilent) {
+        setIsLoadingDetail(true);
+      }
       setDetailError(null);
       try {
         const detail = await getRunFn(runId);
+        if (!isMountedRef.current) return;
         setSelectedRunDetail(detail);
+
+        // Reconcile status in the runs table if it was updated
+        setRuns((prev) =>
+          prev.map((r) =>
+            r.id === detail.id
+              ? {
+                  ...r,
+                  status: detail.status,
+                  durationMs: detail.durationMs,
+                  startedAt: detail.startedAt,
+                  completedAt: detail.completedAt,
+                }
+              : r
+          )
+        );
       } catch (err) {
+        if (!isMountedRef.current) return;
         let msg = 'Failed to load task details for run.';
         if (err instanceof FlowForgeApiError) {
           msg = err.message;
         } else if (err instanceof Error) {
           msg = err.message;
         }
-        setDetailError(msg);
+        if (!isSilent) {
+          setDetailError(msg);
+        }
       } finally {
-        setIsLoadingDetail(false);
+        if (isMountedRef.current && !isSilent) {
+          setIsLoadingDetail(false);
+        }
       }
     },
     [getRunFn]
@@ -130,6 +167,8 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
 
       try {
         const pageRes = await fetchRunsFn(workflowId, { page: pageToLoad, size: 6 });
+        if (!isMountedRef.current) return;
+
         const content = pageRes.content || [];
         setRuns(content);
         setTotalPages(pageRes.totalPages || 0);
@@ -137,16 +176,21 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
         setCurrentPage(pageToLoad);
 
         if (content.length > 0) {
-          // If current selection is still in the new page, keep it, else auto-select first item
-          const stillSelected = selectedRunId && content.some((r) => r.id === selectedRunId);
-          const nextSelectedId = stillSelected ? (selectedRunId as string) : content[0].id;
-          setSelectedRunId(nextSelectedId);
-          void loadRunDetail(nextSelectedId);
+          // If activeRunId is given, prioritize it; otherwise check current selection or first item
+          const targetId = activeRunId && content.some((r) => r.id === activeRunId)
+            ? activeRunId
+            : selectedRunId && content.some((r) => r.id === selectedRunId)
+            ? selectedRunId
+            : content[0].id;
+
+          setSelectedRunId(targetId);
+          void loadRunDetail(targetId);
         } else {
           setSelectedRunId(null);
           setSelectedRunDetail(null);
         }
       } catch (err) {
+        if (!isMountedRef.current) return;
         let msg = 'Failed to load execution runs.';
         if (err instanceof FlowForgeApiError) {
           msg = err.message;
@@ -155,17 +199,91 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
         }
         setRunsError(msg);
       } finally {
-        setIsLoadingRuns(false);
+        if (isMountedRef.current) {
+          setIsLoadingRuns(false);
+        }
       }
     },
-    [workflowId, isMockWorkflow, fetchRunsFn, selectedRunId, loadRunDetail]
+    [workflowId, isMockWorkflow, fetchRunsFn, selectedRunId, activeRunId, loadRunDetail]
   );
 
   useEffect(() => {
     if (isOpen) {
       void loadRuns(0);
     }
-  }, [isOpen, workflowId, isMockWorkflow, refreshTrigger]);
+  }, [isOpen, workflowId, isMockWorkflow, refreshTrigger, activeRunId]);
+
+  // Automated live polling for in-flight execution runs
+  useEffect(() => {
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let isCancelled = false;
+
+    const isRunActive =
+      isOpen &&
+      selectedRunId &&
+      selectedRunDetail &&
+      (selectedRunDetail.status === 'RUNNING' || selectedRunDetail.status === 'PENDING');
+
+    if (!isRunActive) {
+      setIsPolling(false);
+      return;
+    }
+
+    setIsPolling(true);
+
+    const poll = async () => {
+      try {
+        const updated = await getRunFn(selectedRunId!);
+        if (isCancelled || !isMountedRef.current) return;
+
+        setSelectedRunDetail(updated);
+        setRuns((prev) =>
+          prev.map((r) =>
+            r.id === updated.id
+              ? {
+                  ...r,
+                  status: updated.status,
+                  durationMs: updated.durationMs,
+                  startedAt: updated.startedAt,
+                  completedAt: updated.completedAt,
+                }
+              : r
+          )
+        );
+
+        if (
+          updated.status === 'COMPLETED' ||
+          updated.status === 'FAILED' ||
+          updated.status === 'CANCELLED'
+        ) {
+          setIsPolling(false);
+        } else {
+          timerId = setTimeout(() => {
+            void poll();
+          }, pollingIntervalMs);
+        }
+      } catch {
+        if (!isCancelled && isMountedRef.current) {
+          // Graceful soft-retry on transient network hiccup
+          timerId = setTimeout(() => {
+            void poll();
+          }, pollingIntervalMs * 2);
+        }
+      }
+    };
+
+    timerId = setTimeout(() => {
+      void poll();
+    }, pollingIntervalMs);
+
+    return () => {
+      isCancelled = true;
+      if (timerId) {
+        clearTimeout(timerId);
+      }
+      setIsPolling(false);
+    };
+  }, [isOpen, selectedRunId, selectedRunDetail?.status, getRunFn, pollingIntervalMs]);
 
   const handleSelectRun = (run: WorkflowRunSummaryResponseDto) => {
     if (selectedRunId === run.id && selectedRunDetail) return;
@@ -185,24 +303,42 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
     }
   };
 
+  // Task count aggregation for the live Run Dashboard
+  const tasks = selectedRunDetail?.tasks || [];
+  const queuedCount = tasks.filter((t) => t.status === 'PENDING').length;
+  const runningCount = tasks.filter((t) => t.status === 'RUNNING').length;
+  const completedCount = tasks.filter((t) => t.status === 'COMPLETED').length;
+  const failedCount = tasks.filter((t) => t.status === 'FAILED').length;
+
   return (
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Durable Execution History"
+      title="Durable Run Dashboard & History"
       description={
         workflowName
-          ? `Persisted execution runs for "${workflowName}"`
+          ? `Live execution telemetry and persisted runs for "${workflowName}"`
           : 'Durable execution runs recorded in PostgreSQL store'
       }
       maxWidth="xl"
       footer={
         <div className="flex w-full items-center justify-between">
-          <span className="text-[11px] font-mono text-[var(--text-muted)]">
-            {isMockWorkflow
-              ? 'Preview mode (no database persistence)'
-              : `${totalElements} ${totalElements === 1 ? 'run' : 'runs'} recorded`}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-mono text-[var(--text-muted)]">
+              {isMockWorkflow
+                ? 'Preview mode (no database persistence)'
+                : `${totalElements} ${totalElements === 1 ? 'run' : 'runs'} recorded`}
+            </span>
+            {isPolling && (
+              <span
+                data-testid="live-polling-indicator"
+                className="inline-flex items-center gap-1.5 text-[10px] font-medium text-[var(--accent-blue)] bg-[var(--accent-blue)]/10 border border-[var(--accent-blue)]/20 px-2 py-0.5 rounded-[4px]"
+              >
+                <Radio size={10} className="animate-pulse" />
+                Live Polling ({pollingIntervalMs}ms)
+              </span>
+            )}
+          </div>
           <Button variant="outline" size="sm" onClick={onClose} data-testid="close-history-modal">
             Close
           </Button>
@@ -280,12 +416,21 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
                   <span className="font-semibold text-[11px] text-[var(--text-primary)]">
                     Recorded Executions
                   </span>
+                  {isPolling && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-[var(--accent-blue)] font-mono">
+                      <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent-blue)] animate-ping" />
+                      polling
+                    </span>
+                  )}
                 </div>
                 <Button
                   variant="ghost"
                   size="sm"
-                  icon={<RefreshCw size={11} className={isLoadingRuns ? 'animate-spin' : ''} />}
-                  onClick={() => void loadRuns(currentPage)}
+                  icon={<RefreshCw size={11} className={isLoadingRuns || isPolling ? 'animate-spin' : ''} />}
+                  onClick={() => {
+                    void loadRuns(currentPage);
+                    if (selectedRunId) void loadRunDetail(selectedRunId);
+                  }}
                   disabled={isLoadingRuns}
                   data-testid="run-history-refresh-button"
                 >
@@ -294,7 +439,7 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
               </div>
 
               {/* Runs Table */}
-              <div className="overflow-x-auto max-h-52 overflow-y-auto">
+              <div className="overflow-x-auto max-h-44 overflow-y-auto">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="border-b border-[var(--border-default)] bg-[var(--bg-surface)] text-[10px] font-mono uppercase text-[var(--text-muted)]">
@@ -438,6 +583,42 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
                 </div>
               )}
 
+              {/* Run Dashboard: Task Status Summary Cards */}
+              {!isLoadingDetail && !detailError && selectedRunDetail && (
+                <div className="grid grid-cols-5 gap-2" data-testid="run-dashboard-task-counts">
+                  <div className="rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-center">
+                    <span className="block text-[10px] font-mono text-[var(--text-muted)] uppercase">Status</span>
+                    <Badge variant={getRunStatusBadgeVariant(selectedRunDetail.status)} size="sm" dot>
+                      {selectedRunDetail.status}
+                    </Badge>
+                  </div>
+                  <div className="rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-center">
+                    <span className="block text-[10px] font-mono text-[var(--text-muted)] uppercase">Queued</span>
+                    <span className="font-mono text-xs font-semibold text-[var(--text-secondary)]" data-testid="count-queued">
+                      {queuedCount}
+                    </span>
+                  </div>
+                  <div className="rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-center">
+                    <span className="block text-[10px] font-mono text-[var(--text-muted)] uppercase">Running</span>
+                    <span className="font-mono text-xs font-semibold text-[var(--accent-blue)]" data-testid="count-running">
+                      {runningCount}
+                    </span>
+                  </div>
+                  <div className="rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-center">
+                    <span className="block text-[10px] font-mono text-[var(--text-muted)] uppercase">Completed</span>
+                    <span className="font-mono text-xs font-semibold text-[var(--status-green-text)]" data-testid="count-completed">
+                      {completedCount}
+                    </span>
+                  </div>
+                  <div className="rounded-[5px] border border-[var(--border-default)] bg-[var(--bg-subsurface)] p-2 text-center">
+                    <span className="block text-[10px] font-mono text-[var(--text-muted)] uppercase">Failed</span>
+                    <span className="font-mono text-xs font-semibold text-[var(--status-red-text)]" data-testid="count-failed">
+                      {failedCount}
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Task Runs Table */}
               {!isLoadingDetail && !detailError && selectedRunDetail && (
                 <div>
@@ -474,7 +655,15 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
                                 </Badge>
                               </td>
                               <td className="py-2 px-3 font-mono text-[11px] text-[var(--text-secondary)] whitespace-nowrap">
-                                {task.attemptCount} {task.attemptCount === 1 ? 'attempt' : 'attempts'}
+                                <span>{task.attemptCount} {task.attemptCount === 1 ? 'attempt' : 'attempts'}</span>
+                                {task.attemptCount > 1 && (
+                                  <span
+                                    data-testid={`task-retried-${task.taskId}`}
+                                    className="ml-1.5 text-[10px] text-[var(--status-yellow-text)] font-semibold"
+                                  >
+                                    (Retried)
+                                  </span>
+                                )}
                               </td>
                               <td className="py-2 px-3 font-mono text-[11px] text-[var(--text-secondary)] whitespace-nowrap">
                                 {formatDuration(task.durationMs)}
@@ -490,9 +679,7 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
                                     <span className="truncate">{task.errorMessage}</span>
                                   </div>
                                 ) : (
-                                  <span className="text-[var(--text-muted)] font-mono text-[10px]">
-                                    —
-                                  </span>
+                                  <span className="text-[var(--text-muted)] font-mono text-[11px]">—</span>
                                 )}
                               </td>
                             </tr>
@@ -501,9 +688,9 @@ export const RunHistoryModal: React.FC<RunHistoryModalProps> = ({
                       </table>
                     </div>
                   ) : (
-                    <p className="text-[11px] text-[var(--text-muted)] py-3 text-center italic">
-                      No task execution records recorded for this workflow run.
-                    </p>
+                    <div className="py-4 text-center text-xs text-[var(--text-muted)]">
+                      No task telemetry recorded for this run.
+                    </div>
                   )}
                 </div>
               )}

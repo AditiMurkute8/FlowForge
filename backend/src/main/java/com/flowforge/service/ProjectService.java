@@ -119,6 +119,22 @@ public class ProjectService {
     }
 
     @Transactional
+    public Project updateProject(UUID id, String name, String description) {
+        Objects.requireNonNull(id, "Project ID must not be null");
+        if (authorizationService != null) {
+            authorizationService.requireEditAccess(id);
+        }
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("Project name must not be blank");
+        }
+        Project project = projectRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Project not found: " + id));
+        project.setName(name.trim());
+        project.setDescription(description != null ? description.trim() : null);
+        return projectRepository.save(project);
+    }
+
+    @Transactional
     public void deleteProject(UUID id) {
         Objects.requireNonNull(id, "Project ID must not be null");
         if (authorizationService != null) {

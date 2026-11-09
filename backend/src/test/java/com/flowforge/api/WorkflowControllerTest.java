@@ -2,6 +2,7 @@ package com.flowforge.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flowforge.api.dto.CreateWorkflowRequest;
+import com.flowforge.api.dto.UpdateWorkflowRequest;
 import com.flowforge.domain.Project;
 import com.flowforge.domain.Workflow;
 import com.flowforge.service.WorkflowService;
@@ -281,6 +282,62 @@ class WorkflowControllerTest {
                 .when(workflowService).deleteWorkflow(missingId);
 
         mockMvc.perform(delete("/api/v1/workflows/{workflowId}", missingId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"));
+    }
+
+    @Test
+    @DisplayName("15. PUT /api/v1/workflows/{workflowId} successfully updates workflow name and description")
+    void updateWorkflow_success() throws Exception {
+        UUID workflowId = UUID.randomUUID();
+        UUID projectId = UUID.randomUUID();
+        Project parentProject = new Project(projectId, "Parent", "parent", "Desc");
+        UpdateWorkflowRequest request = new UpdateWorkflowRequest("Updated Flow", "Updated Description");
+        Workflow updated = new Workflow(workflowId, parentProject, "Updated Flow", "flow-slug", "Updated Description");
+        updated.setCreatedAt(Instant.now());
+        updated.setUpdatedAt(Instant.now());
+
+        when(workflowService.updateWorkflow(eq(workflowId), eq("Updated Flow"), eq("Updated Description")))
+                .thenReturn(updated);
+
+        mockMvc.perform(put("/api/v1/workflows/{workflowId}", workflowId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(workflowId.toString()))
+                .andExpect(jsonPath("$.name").value("Updated Flow"))
+                .andExpect(jsonPath("$.slug").value("flow-slug"))
+                .andExpect(jsonPath("$.description").value("Updated Description"));
+    }
+
+    @Test
+    @DisplayName("16. PUT /api/v1/workflows/{workflowId} returns 400 Bad Request on blank name")
+    void updateWorkflow_blankName_validationFailure() throws Exception {
+        UUID workflowId = UUID.randomUUID();
+        UpdateWorkflowRequest request = new UpdateWorkflowRequest("   ", "Valid desc");
+
+        mockMvc.perform(put("/api/v1/workflows/{workflowId}", workflowId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.details", hasItem(containsString("Workflow name must not be blank"))));
+    }
+
+    @Test
+    @DisplayName("17. PUT /api/v1/workflows/{workflowId} returns 404 Not Found when workflow does not exist")
+    void updateWorkflow_notFound() throws Exception {
+        UUID missingId = UUID.randomUUID();
+        UpdateWorkflowRequest request = new UpdateWorkflowRequest("Valid Flow", "Valid desc");
+
+        when(workflowService.updateWorkflow(eq(missingId), eq("Valid Flow"), eq("Valid desc")))
+                .thenThrow(new ResourceNotFoundException("Workflow not found: " + missingId));
+
+        mockMvc.perform(put("/api/v1/workflows/{workflowId}", missingId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.status").value(404))
                 .andExpect(jsonPath("$.error").value("Not Found"));

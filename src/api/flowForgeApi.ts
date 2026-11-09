@@ -6,8 +6,10 @@ import type {
   ApiErrorResponse,
   PageResponse,
   CreateProjectRequest,
+  UpdateProjectRequest,
   ProjectResponseDto,
   CreateWorkflowRequest,
+  UpdateWorkflowRequest,
   WorkflowResponseDto,
   CreateWorkflowVersionRequest,
   WorkflowVersionResponseDto,
@@ -412,6 +414,40 @@ export async function getProject(
 }
 
 /**
+ * Updates an existing project's name and description.
+ * Protected endpoint; requires DEVELOPER or ADMIN role in the project.
+ *
+ * @param projectId Unique identifier of the project to update
+ * @param request Payload containing updated project name and optional description
+ * @param options Optional client overrides (custom baseUrl, fetch implementation, or token)
+ * @returns Updated ProjectResponseDto entity
+ * @throws FlowForgeApiError on validation error (400), forbidden (403), not found (404), or network error
+ */
+export async function updateProject(
+  projectId: string,
+  request: UpdateProjectRequest,
+  options?: ApiClientOptions
+): Promise<ProjectResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/projects/${encodeURIComponent(projectId)}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'PUT',
+      headers: buildHeaders(options, true, true),
+      body: JSON.stringify(request),
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<ProjectResponseDto>(response);
+}
+
+/**
  * Deletes a project by ID from the FlowForge backend.
  * Protected endpoint; requires ADMIN role in the project.
  *
@@ -494,6 +530,70 @@ export async function createWorkflow(
   }
 
   return handleResponse<WorkflowResponseDto>(response);
+}
+
+/**
+ * Updates an existing workflow definition's name and description.
+ * Protected endpoint; requires DEVELOPER or ADMIN role in the parent project.
+ *
+ * @param workflowId Unique identifier of the workflow to update
+ * @param request Payload containing updated workflow name and optional description
+ * @param options Optional client overrides (custom baseUrl, fetch implementation, or token)
+ * @returns Updated WorkflowResponseDto entity
+ * @throws FlowForgeApiError on validation error (400), forbidden (403), not found (404), or network error
+ */
+export async function updateWorkflow(
+  workflowId: string,
+  request: UpdateWorkflowRequest,
+  options?: ApiClientOptions
+): Promise<WorkflowResponseDto> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/workflows/${encodeURIComponent(workflowId)}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'PUT',
+      headers: buildHeaders(options, true, true),
+      body: JSON.stringify(request),
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  return handleResponse<WorkflowResponseDto>(response);
+}
+
+/**
+ * Deletes a workflow by ID from the FlowForge backend.
+ * Protected endpoint; requires DEVELOPER or ADMIN role in the parent project.
+ *
+ * @param workflowId Unique identifier of the workflow to delete
+ * @param options Optional client overrides (custom baseUrl, fetch implementation, or token)
+ * @throws FlowForgeApiError on conflict (409 if versions exist), forbidden (403), not found (404), or network error
+ */
+export async function deleteWorkflow(
+  workflowId: string,
+  options?: ApiClientOptions
+): Promise<void> {
+  const fetchImpl = options?.fetchFn || fetch;
+  const apiRoot = resolveApiRoot(options?.baseUrl);
+  const url = `${apiRoot}/workflows/${encodeURIComponent(workflowId)}`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'DELETE',
+      headers: buildHeaders(options, true, false),
+    });
+  } catch (err) {
+    if (err instanceof FlowForgeApiError) throw err;
+    throw new FlowForgeApiError(0, 'Network failure: Unable to connect to FlowForge server');
+  }
+
+  await handleResponse<void>(response);
 }
 
 /**

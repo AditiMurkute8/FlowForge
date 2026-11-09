@@ -6,6 +6,8 @@ import com.flowforge.api.dto.AddProjectMemberRequest;
 import com.flowforge.api.dto.CreateProjectRequest;
 import com.flowforge.api.dto.CreateWorkflowRequest;
 import com.flowforge.api.dto.CreateWorkflowVersionRequest;
+import com.flowforge.api.dto.UpdateProjectRequest;
+import com.flowforge.api.dto.UpdateWorkflowRequest;
 import com.flowforge.domain.*;
 import com.flowforge.persistence.repository.*;
 import com.flowforge.service.JwtService;
@@ -116,6 +118,18 @@ class ProjectRbacIntegrationTest {
 
         mockMvc.perform(get("/api/v1/workflows/" + testWorkflow.getId()))
             .andExpect(status().isUnauthorized());
+
+        UpdateProjectRequest pReq = new UpdateProjectRequest("Unauth Name", null);
+        mockMvc.perform(put("/api/v1/projects/" + testProject.getId())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(pReq)))
+            .andExpect(status().isUnauthorized());
+
+        UpdateWorkflowRequest wfReq = new UpdateWorkflowRequest("Unauth Name", null);
+        mockMvc.perform(put("/api/v1/workflows/" + testWorkflow.getId())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(wfReq)))
+            .andExpect(status().isUnauthorized());
     }
 
     @Test
@@ -148,6 +162,21 @@ class ProjectRbacIntegrationTest {
         // Members
         mockMvc.perform(get("/api/v1/projects/" + testProject.getId() + "/members")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + outsiderToken))
+            .andExpect(status().isNotFound());
+
+        // Update Project & Workflow (Anti-Leakage 404)
+        UpdateProjectRequest pReq = new UpdateProjectRequest("Outsider Name", null);
+        mockMvc.perform(put("/api/v1/projects/" + testProject.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + outsiderToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(pReq)))
+            .andExpect(status().isNotFound());
+
+        UpdateWorkflowRequest wfUpdateReq = new UpdateWorkflowRequest("Outsider Name", null);
+        mockMvc.perform(put("/api/v1/workflows/" + testWorkflow.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + outsiderToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(wfUpdateReq)))
             .andExpect(status().isNotFound());
     }
 
@@ -208,6 +237,22 @@ class ProjectRbacIntegrationTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(memReq)))
             .andExpect(status().isForbidden());
+
+        // Update Project is forbidden for VIEWER
+        UpdateProjectRequest pReq = new UpdateProjectRequest("Viewer New Name", null);
+        mockMvc.perform(put("/api/v1/projects/" + testProject.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + viewerToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(pReq)))
+            .andExpect(status().isForbidden());
+
+        // Update Workflow is forbidden for VIEWER
+        UpdateWorkflowRequest wfUpdateReq = new UpdateWorkflowRequest("Viewer New Name", null);
+        mockMvc.perform(put("/api/v1/workflows/" + testWorkflow.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + viewerToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(wfUpdateReq)))
+            .andExpect(status().isForbidden());
     }
 
     @Test
@@ -220,6 +265,23 @@ class ProjectRbacIntegrationTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(wfReq)))
             .andExpect(status().isCreated());
+
+        // Update project and workflow succeeds for DEVELOPER
+        UpdateProjectRequest pReq = new UpdateProjectRequest("Dev Updated Name", "Dev Desc");
+        mockMvc.perform(put("/api/v1/projects/" + testProject.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + devToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(pReq)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("Dev Updated Name"));
+
+        UpdateWorkflowRequest wfUpdateReq = new UpdateWorkflowRequest("Dev Updated Wf", "Dev Wf Desc");
+        mockMvc.perform(put("/api/v1/workflows/" + testWorkflow.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + devToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(wfUpdateReq)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("Dev Updated Wf"));
 
         // Delete project is forbidden
         mockMvc.perform(delete("/api/v1/projects/" + testProject.getId())
@@ -247,6 +309,23 @@ class ProjectRbacIntegrationTest {
             .andExpect(status().isCreated())
             .andExpect(jsonPath("$.userId").value(outsiderUser.getId().toString()))
             .andExpect(jsonPath("$.role").value("DEVELOPER"));
+
+        // Update project and workflow succeeds for ADMIN
+        UpdateProjectRequest adminPReq = new UpdateProjectRequest("Admin Updated Name", "Admin Desc");
+        mockMvc.perform(put("/api/v1/projects/" + testProject.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + adminToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(adminPReq)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("Admin Updated Name"));
+
+        UpdateWorkflowRequest adminWfReq = new UpdateWorkflowRequest("Admin Updated Wf", "Admin Wf Desc");
+        mockMvc.perform(put("/api/v1/workflows/" + testWorkflow.getId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + adminToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(adminWfReq)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("Admin Updated Wf"));
 
         // Outsider is now a member and can read
         mockMvc.perform(get("/api/v1/projects/" + testProject.getId())

@@ -2,6 +2,7 @@ package com.flowforge.api;
 
 import com.flowforge.api.dto.CreateProjectRequest;
 import com.flowforge.api.dto.ProjectResponse;
+import com.flowforge.api.dto.UpdateProjectRequest;
 import com.flowforge.domain.Project;
 import com.flowforge.service.ProjectService;
 import jakarta.validation.Valid;
@@ -48,6 +49,15 @@ public class ProjectController {
     @GetMapping("/slug/{slug}")
     public ResponseEntity<ProjectResponse> getProjectBySlug(@PathVariable String slug) {
         Project project = projectService.getProjectBySlug(slug);
+        return ResponseEntity.ok(ProjectResponse.fromEntity(project));
+    }
+
+    @PutMapping("/{projectId}")
+    public ResponseEntity<ProjectResponse> updateProject(
+            @PathVariable UUID projectId,
+            @Valid @RequestBody UpdateProjectRequest request
+    ) {
+        Project project = projectService.updateProject(projectId, request.name(), request.description());
         return ResponseEntity.ok(ProjectResponse.fromEntity(project));
     }
 

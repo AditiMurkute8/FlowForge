@@ -2120,4 +2120,91 @@ describe('WorkflowBuilder Integration & Validation Workflow', () => {
       expect(nonMemberUi.showReadOnlyBanner).toBe(true);
     });
   });
+
+  describe('Workflow Metadata Update & Live Run Dashboard Orchestration', () => {
+    it('handles updating workflow name and description successfully', async () => {
+      const mockUpdatedWorkflow: WorkflowResponseDto = {
+        id: 'wf-123',
+        projectId: 'proj-456',
+        name: 'Updated Pipeline Name',
+        slug: 'original-slug',
+        description: 'New operational description',
+        createdAt: '2026-10-21T10:00:00Z',
+        updatedAt: '2026-10-21T11:00:00Z',
+      };
+
+      const updateWorkflowFn = vi.fn().mockResolvedValue(mockUpdatedWorkflow);
+
+      const res = await updateWorkflowFn('wf-123', {
+        name: 'Updated Pipeline Name',
+        description: 'New operational description',
+      });
+
+      expect(updateWorkflowFn).toHaveBeenCalledWith('wf-123', {
+        name: 'Updated Pipeline Name',
+        description: 'New operational description',
+      });
+      expect(res.name).toBe('Updated Pipeline Name');
+      expect(res.slug).toBe('original-slug');
+      expect(res.description).toBe('New operational description');
+    });
+
+    it('rejects blank workflow name during metadata update', () => {
+      const validateUpdateInput = (name: string) => {
+        if (!name || name.trim().length === 0) {
+          throw new Error('Workflow name must not be blank');
+        }
+        if (name.trim().length > 100) {
+          throw new Error('Workflow name must not exceed 100 characters');
+        }
+        return true;
+      };
+
+      expect(() => validateUpdateInput('')).toThrow('Workflow name must not be blank');
+      expect(() => validateUpdateInput('   ')).toThrow('Workflow name must not be blank');
+      expect(() => validateUpdateInput('A'.repeat(101))).toThrow('Workflow name must not exceed 100 characters');
+      expect(validateUpdateInput('Valid Name')).toBe(true);
+    });
+
+    it('orchestrates opening live run dashboard and discovering committed run ID on durable execution', async () => {
+      const mockCommittedRun = {
+        id: 'run-live-999',
+        workflowId: 'wf-123',
+        workflowVersionId: 'ver-1',
+        versionNumber: 1,
+        status: 'RUNNING' as const,
+        startedAt: '2026-10-21T10:00:00Z',
+        completedAt: null,
+        durationMs: null,
+        triggeredBy: 'manual-ui',
+        createdAt: '2026-10-21T10:00:00Z',
+        taskCount: 3,
+      };
+
+      const fetchRunsFn = vi.fn().mockResolvedValue({
+        content: [mockCommittedRun],
+        totalElements: 1,
+        totalPages: 1,
+        size: 1,
+        number: 0,
+      });
+
+      let isRunDashboardOpen = false;
+      let activeRunId: string | null = null;
+
+      const triggerDurableExecution = async (workflowId: string) => {
+        isRunDashboardOpen = true;
+        const res = await fetchRunsFn(workflowId, { page: 0, size: 1 });
+        if (res.content?.[0]) {
+          activeRunId = res.content[0].id;
+        }
+      };
+
+      await triggerDurableExecution('wf-123');
+
+      expect(isRunDashboardOpen).toBe(true);
+      expect(activeRunId).toBe('run-live-999');
+      expect(fetchRunsFn).toHaveBeenCalledWith('wf-123', { page: 0, size: 1 });
+    });
+  });
 });

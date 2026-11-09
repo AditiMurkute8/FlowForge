@@ -127,6 +127,22 @@ public class WorkflowService {
     }
 
     @Transactional
+    public Workflow updateWorkflow(UUID id, String name, String description) {
+        Objects.requireNonNull(id, "Workflow ID must not be null");
+        Workflow workflow = workflowRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Workflow not found: " + id));
+        if (authorizationService != null) {
+            authorizationService.requireEditAccess(workflow.getProject().getId());
+        }
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("Workflow name must not be blank");
+        }
+        workflow.setName(name.trim());
+        workflow.setDescription(description != null ? description.trim() : null);
+        return workflowRepository.save(workflow);
+    }
+
+    @Transactional
     public void deleteWorkflow(UUID id) {
         Objects.requireNonNull(id, "Workflow ID must not be null");
         Workflow workflow = workflowRepository.findById(id)

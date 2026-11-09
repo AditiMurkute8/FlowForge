@@ -2,6 +2,7 @@ package com.flowforge.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flowforge.api.dto.CreateProjectRequest;
+import com.flowforge.api.dto.UpdateProjectRequest;
 import com.flowforge.domain.Project;
 import com.flowforge.service.ProjectService;
 import com.flowforge.service.exception.ResourceConflictException;
@@ -250,6 +251,60 @@ class ProjectControllerTest {
                 .when(projectService).deleteProject(missingId);
 
         mockMvc.perform(delete("/api/v1/projects/{projectId}", missingId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"));
+    }
+
+    @Test
+    @DisplayName("14. PUT /api/v1/projects/{projectId} successfully updates project name and description")
+    void updateProject_success() throws Exception {
+        UUID projectId = UUID.randomUUID();
+        UpdateProjectRequest request = new UpdateProjectRequest("Updated Name", "Updated Desc");
+        Project updated = new Project(projectId, "Updated Name", "original-slug", "Updated Desc");
+        updated.setCreatedAt(Instant.now());
+        updated.setUpdatedAt(Instant.now());
+
+        when(projectService.updateProject(eq(projectId), eq("Updated Name"), eq("Updated Desc")))
+                .thenReturn(updated);
+
+        mockMvc.perform(put("/api/v1/projects/{projectId}", projectId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(projectId.toString()))
+                .andExpect(jsonPath("$.name").value("Updated Name"))
+                .andExpect(jsonPath("$.slug").value("original-slug"))
+                .andExpect(jsonPath("$.description").value("Updated Desc"));
+    }
+
+    @Test
+    @DisplayName("15. PUT /api/v1/projects/{projectId} returns 400 Bad Request on blank name")
+    void updateProject_blankName_validationFailure() throws Exception {
+        UUID projectId = UUID.randomUUID();
+        UpdateProjectRequest request = new UpdateProjectRequest("   ", "Valid description");
+
+        mockMvc.perform(put("/api/v1/projects/{projectId}", projectId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.details", hasItem(containsString("Project name must not be blank"))));
+    }
+
+    @Test
+    @DisplayName("16. PUT /api/v1/projects/{projectId} returns 404 Not Found when project does not exist")
+    void updateProject_notFound() throws Exception {
+        UUID missingId = UUID.randomUUID();
+        UpdateProjectRequest request = new UpdateProjectRequest("Valid Name", "Valid description");
+
+        when(projectService.updateProject(eq(missingId), eq("Valid Name"), eq("Valid description")))
+                .thenThrow(new ResourceNotFoundException("Project not found: " + missingId));
+
+        mockMvc.perform(put("/api/v1/projects/{projectId}", missingId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.status").value(404))
                 .andExpect(jsonPath("$.error").value("Not Found"));

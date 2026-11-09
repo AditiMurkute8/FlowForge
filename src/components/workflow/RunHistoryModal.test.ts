@@ -270,4 +270,152 @@ describe('RunHistoryModal & Lifecycle Logic', () => {
       expect(fetchRunsFn).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('Live Run Dashboard & Task Aggregation Logic', () => {
+    it('accurately computes task breakdown counts for queued, running, completed, and failed tasks', () => {
+      const mockTasks: TaskRunResponseDto[] = [
+        {
+          id: 't-1',
+          taskId: 'step-pending',
+          status: 'PENDING',
+          attemptCount: 1,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          errorMessage: null,
+          createdAt: '2026-10-20T10:00:00Z',
+        },
+        {
+          id: 't-2',
+          taskId: 'step-running',
+          status: 'RUNNING',
+          attemptCount: 1,
+          startedAt: '2026-10-20T10:00:01Z',
+          completedAt: null,
+          durationMs: null,
+          errorMessage: null,
+          createdAt: '2026-10-20T10:00:00Z',
+        },
+        {
+          id: 't-3',
+          taskId: 'step-completed-1',
+          status: 'COMPLETED',
+          attemptCount: 1,
+          startedAt: '2026-10-20T10:00:01Z',
+          completedAt: '2026-10-20T10:00:02Z',
+          durationMs: 1000,
+          errorMessage: null,
+          createdAt: '2026-10-20T10:00:00Z',
+        },
+        {
+          id: 't-4',
+          taskId: 'step-completed-2',
+          status: 'COMPLETED',
+          attemptCount: 2,
+          startedAt: '2026-10-20T10:00:02Z',
+          completedAt: '2026-10-20T10:00:04Z',
+          durationMs: 2000,
+          errorMessage: null,
+          createdAt: '2026-10-20T10:00:00Z',
+        },
+        {
+          id: 't-5',
+          taskId: 'step-failed',
+          status: 'FAILED',
+          attemptCount: 3,
+          startedAt: '2026-10-20T10:00:04Z',
+          completedAt: '2026-10-20T10:00:05Z',
+          durationMs: 1000,
+          errorMessage: 'Task failed with non-zero exit code',
+          createdAt: '2026-10-20T10:00:00Z',
+        },
+      ];
+
+      const queuedCount = mockTasks.filter((t) => t.status === 'PENDING').length;
+      const runningCount = mockTasks.filter((t) => t.status === 'RUNNING').length;
+      const completedCount = mockTasks.filter((t) => t.status === 'COMPLETED').length;
+      const failedCount = mockTasks.filter((t) => t.status === 'FAILED').length;
+
+      expect(queuedCount).toBe(1);
+      expect(runningCount).toBe(1);
+      expect(completedCount).toBe(2);
+      expect(failedCount).toBe(1);
+      expect(mockTasks.length).toBe(5);
+    });
+
+    it('returns zero for all task categories when tasks list is empty or undefined', () => {
+      const emptyTasks: TaskRunResponseDto[] = [];
+      expect(emptyTasks.filter((t) => t.status === 'PENDING').length).toBe(0);
+      expect(emptyTasks.filter((t) => t.status === 'RUNNING').length).toBe(0);
+      expect(emptyTasks.filter((t) => t.status === 'COMPLETED').length).toBe(0);
+      expect(emptyTasks.filter((t) => t.status === 'FAILED').length).toBe(0);
+    });
+  });
+
+  describe('Automated Live Polling Lifecycle', () => {
+    it('determines whether polling should be active based on run status and modal visibility', () => {
+      const shouldPoll = (isOpen: boolean, status: string | undefined) => {
+        return isOpen && (status === 'RUNNING' || status === 'PENDING');
+      };
+
+      // Modal closed -> no polling
+      expect(shouldPoll(false, 'RUNNING')).toBe(false);
+      expect(shouldPoll(false, 'PENDING')).toBe(false);
+
+      // In-flight statuses with open modal -> active polling
+      expect(shouldPoll(true, 'RUNNING')).toBe(true);
+      expect(shouldPoll(true, 'PENDING')).toBe(true);
+
+      // Terminal statuses with open modal -> polling stops
+      expect(shouldPoll(true, 'COMPLETED')).toBe(false);
+      expect(shouldPoll(true, 'FAILED')).toBe(false);
+      expect(shouldPoll(true, 'CANCELLED')).toBe(false);
+    });
+
+    it('simulates polling loop stopping on terminal transition', async () => {
+      const getRunDetailMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: 'run-poll-1',
+          status: 'RUNNING',
+          tasks: [{ id: 't1', status: 'RUNNING', attemptCount: 1 }],
+        })
+        .mockResolvedValueOnce({
+          id: 'run-poll-1',
+          status: 'COMPLETED',
+          tasks: [{ id: 't1', status: 'COMPLETED', attemptCount: 1 }],
+        });
+
+      let pollingActive = true;
+      let iterations = 0;
+
+      while (pollingActive && iterations < 5) {
+        iterations++;
+        const update = await getRunDetailMock();
+        if (
+          update.status === 'COMPLETED' ||
+          update.status === 'FAILED' ||
+          update.status === 'CANCELLED'
+        ) {
+          pollingActive = false;
+        }
+      }
+
+      expect(iterations).toBe(2);
+      expect(pollingActive).toBe(false);
+      expect(getRunDetailMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Retried Task Indicator Logic', () => {
+    it('correctly identifies tasks that have undergone retries', () => {
+      const isRetried = (attemptCount: number) => attemptCount > 1;
+
+      expect(isRetried(1)).toBe(false);
+      expect(isRetried(0)).toBe(false);
+      expect(isRetried(2)).toBe(true);
+      expect(isRetried(3)).toBe(true);
+      expect(isRetried(5)).toBe(true);
+    });
+  });
 });

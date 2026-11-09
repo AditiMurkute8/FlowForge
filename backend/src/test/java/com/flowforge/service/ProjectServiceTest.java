@@ -156,4 +156,44 @@ class ProjectServiceTest {
 
         verify(projectRepository, never()).delete(any());
     }
+
+    @Test
+    @DisplayName("updateProject updates name and description successfully")
+    void testUpdateProjectSuccess() {
+        UUID id = UUID.randomUUID();
+        Project existing = new Project(id, "Old Name", "old-name", "Old Desc");
+        when(projectRepository.findById(id)).thenReturn(Optional.of(existing));
+        when(projectRepository.save(existing)).thenAnswer(inv -> inv.getArgument(0));
+
+        Project updated = projectService.updateProject(id, "New Name", "New Desc");
+
+        assertThat(updated.getName()).isEqualTo("New Name");
+        assertThat(updated.getDescription()).isEqualTo("New Desc");
+        assertThat(updated.getSlug()).isEqualTo("old-name"); // slug is preserved
+        verify(projectRepository).save(existing);
+    }
+
+    @Test
+    @DisplayName("updateProject throws IllegalArgumentException when name is blank")
+    void testUpdateProjectBlankName() {
+        UUID id = UUID.randomUUID();
+        assertThatThrownBy(() -> projectService.updateProject(id, "  ", "Desc"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Project name must not be blank");
+
+        verify(projectRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("updateProject throws ResourceNotFoundException when project does not exist")
+    void testUpdateProjectNotFound() {
+        UUID id = UUID.randomUUID();
+        when(projectRepository.findById(id)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> projectService.updateProject(id, "Valid Name", "Desc"))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("Project not found: " + id);
+
+        verify(projectRepository, never()).save(any());
+    }
 }
